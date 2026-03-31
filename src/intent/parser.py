@@ -9,7 +9,14 @@ Output schema (one row in short_term_intents.parquet):
     goal_concepts, constraints_json,
     deviation_reason, confidence, ttl_steps,
     is_deviation, persona_alignment_score,
-    evidence_item_ids, source_mode, parser_status
+    evidence_item_ids, source_mode, parser_status,
+    -- Stage 2 grounded selector fields --
+    raw_llm_goals, validated_goal_concepts, grounding_diagnostics,
+    -- v3 rationale + provenance fields --
+    llm_explanation_short, why_not_aligned, why_exploration,
+    llm_raw, evidence_recent_concepts, evidence_persona_concepts,
+    raw_model_response_json, pre_grounding_goal_text,
+    reason_source, has_stage2, llm_prompt_version, schema_version
 """
 
 from __future__ import annotations
@@ -133,6 +140,57 @@ def parse_intent(
     if not isinstance(grounding_diagnostics, dict):
         grounding_diagnostics = {}
 
+    # ── v3: rationale slots (LLM-generated; empty string when absent/fallback) ──
+    def _clean_str(val: Any, max_len: int = 300) -> str:
+        """Normalize to str, strip, clip. Never None — always "". Parquet-safe."""
+        if val is None or not isinstance(val, str):
+            return ""
+        return val.strip()[:max_len]
+
+    llm_explanation_short = _clean_str(raw.get("llm_explanation_short"))
+    why_not_aligned       = _clean_str(raw.get("why_not_aligned"))
+    why_exploration       = _clean_str(raw.get("why_exploration"))
+
+    # Enforce conditional emptiness: slots that must be "" for certain reasons.
+    if reason == "aligned":
+        why_not_aligned = ""
+        why_exploration = ""
+    if reason != "exploration":
+        why_exploration = ""
+
+    # ── v3: provenance fields (code-injected in llm_interpreter; forwarded here) ──
+    llm_raw = raw.get("llm_raw")  # raw JSON string from LLM; None for heuristic/fallback
+    if not isinstance(llm_raw, str):
+        llm_raw = None
+
+    # raw_model_response_json: alias of llm_raw (prefer over None if present)
+    raw_model_response_json = raw.get("raw_model_response_json")
+    if not isinstance(raw_model_response_json, str):
+        raw_model_response_json = llm_raw  # fall through to llm_raw
+
+    # evidence_recent_concepts / evidence_persona_concepts: list[str]
+    def _clean_str_list(val: Any) -> list[str]:
+        if val is None:
+            return []
+        if _is_concept_list(val):
+            return [str(c) for c in val]
+        return []
+
+    evidence_recent_concepts  = _clean_str_list(raw.get("evidence_recent_concepts"))
+    evidence_persona_concepts = _clean_str_list(raw.get("evidence_persona_concepts"))
+
+    # pre_grounding_goal_text: same as raw_llm_goals when present
+    pre_grounding_raw = raw.get("pre_grounding_goal_text")
+    if _is_concept_list(pre_grounding_raw):
+        pre_grounding_goal_text = [str(c) for c in pre_grounding_raw]
+    else:
+        pre_grounding_goal_text = list(raw_llm_goals)  # fallback: same as raw_llm_goals
+
+    reason_source      = _clean_str(raw.get("reason_source", source_mode), max_len=50)
+    has_stage2         = bool(raw.get("has_stage2", False))
+    llm_prompt_version = _clean_str(raw.get("llm_prompt_version", ""), max_len=50)
+    schema_version     = _clean_str(raw.get("schema_version", ""), max_len=20)
+
     return {
         "user_id": user_id,
         "target_index": target_index,
@@ -154,4 +212,18 @@ def parse_intent(
         "raw_llm_goals": raw_llm_goals,
         "validated_goal_concepts": validated_goal_concepts,
         "grounding_diagnostics": grounding_diagnostics,
+        # v3 rationale slots (LLM-generated)
+        "llm_explanation_short": llm_explanation_short,
+        "why_not_aligned": why_not_aligned,
+        "why_exploration": why_exploration,
+        # v3 provenance fields (code-injected)
+        "llm_raw": llm_raw,
+        "evidence_recent_concepts": evidence_recent_concepts,
+        "evidence_persona_concepts": evidence_persona_concepts,
+        "raw_model_response_json": raw_model_response_json,
+        "pre_grounding_goal_text": pre_grounding_goal_text,
+        "reason_source": reason_source,
+        "has_stage2": has_stage2,
+        "llm_prompt_version": llm_prompt_version,
+        "schema_version": schema_version,
     }

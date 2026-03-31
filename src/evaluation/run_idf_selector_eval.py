@@ -124,7 +124,8 @@ def _grounding_stats(
 
     rows = []
     for key, rec in intent_by_key.items():
-        goals = _to_list(rec.get(goal_field) or rec.get("goal_concepts"))
+        _g = rec.get(goal_field)
+        goals = _to_list(_g if _g is not None else rec.get("goal_concepts"))
         reason = rec.get("deviation_reason", "unknown")
         cands = cand_by_key.get(key, [])
         bank = build_candidate_concept_bank(cands, item_concepts)
@@ -153,7 +154,8 @@ def _gt_stats(
 ) -> pd.DataFrame:
     rows = []
     for key, rec in intent_by_key.items():
-        goals = set(_to_list(rec.get(goal_field) or rec.get("goal_concepts")))
+        _g = rec.get(goal_field)
+        goals = set(_to_list(_g if _g is not None else rec.get("goal_concepts")))
         gt_items = is_gt_by_key.get(key, set())
         gt_concepts: set[str] = set()
         for iid in gt_items:
@@ -605,7 +607,8 @@ def _apply_idf_scoring_on_the_fly(
 
     for key, rec in llm_by_key.items():
         # Start from already-validated (activation-gated) concepts
-        validated = _to_list_local(rec.get("validated_goal_concepts") or rec.get("goal_concepts"))
+        _vgc = rec.get("validated_goal_concepts")
+        validated = _to_list_local(_vgc if _vgc is not None else rec.get("goal_concepts"))
         bank = bank_by_key.get(key, {})
         reason = rec.get("deviation_reason", "unknown")
         max_goals = max_goals_map.get(reason, 3)

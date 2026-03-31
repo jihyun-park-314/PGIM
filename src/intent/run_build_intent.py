@@ -413,7 +413,11 @@ def main() -> None:
     # ----------------------------------------------------------------
     df_intents = pd.DataFrame(intent_records)
     # Ensure list columns are stored as object (list-of-str), not inferred as scalar/int
-    for _list_col in ("goal_concepts", "evidence_item_ids", "raw_llm_goals", "validated_goal_concepts"):
+    _list_cols = (
+        "goal_concepts", "evidence_item_ids", "raw_llm_goals", "validated_goal_concepts",
+        "evidence_recent_concepts", "evidence_persona_concepts", "pre_grounding_goal_text",
+    )
+    for _list_col in _list_cols:
         if _list_col in df_intents.columns:
             df_intents[_list_col] = df_intents[_list_col].apply(
                 lambda x: list(x) if isinstance(x, (list, tuple)) else ([] if x is None else [str(x)])
