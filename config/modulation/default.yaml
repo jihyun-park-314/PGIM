@@ -1,0 +1,58 @@
+# ── Experiment mode ──────────────────────────────────────────────
+# backbone_only | persona_only_rerank | intent_only_rerank |
+# weighted_sum_baseline | hard_switch_baseline | graph_conditioned_full
+mode: graph_conditioned_full
+
+# ── Delta scale ──────────────────────────────────────────────────
+delta:
+  max_boost: 0.30       # max additive delta for boost
+  max_suppress: 0.15    # max subtractive delta for suppress
+  filter_penalty: 0.50  # penalty for constraint violation (applied as -penalty)
+
+# ── Reason-specific boost/suppress weights ───────────────────────
+reason_policy:
+  aligned:
+    boost_scale: 0.8
+    suppress_scale: 0.3
+    filter_active: false
+  exploration:
+    boost_scale: 0.5
+    suppress_scale: 0.1
+    filter_active: false
+  task_focus:
+    boost_scale: 1.0
+    suppress_scale: 0.5
+    filter_active: true
+  budget_shift:
+    boost_scale: 0.7
+    suppress_scale: 0.8
+    filter_active: true
+  unknown:
+    boost_scale: 0.3
+    suppress_scale: 0.1
+    filter_active: false
+
+# ── Gate formula ─────────────────────────────────────────────────
+gate:
+  # gate_strength = base_weight * confidence_factor * alignment_factor
+  reason_base_weight:
+    aligned: 0.7
+    exploration: 0.6
+    task_focus: 0.9
+    budget_shift: 0.8
+    unknown: 0.25
+  confidence_power: 1.0     # gate *= confidence ^ power
+  alignment_clip_min: 0.05  # floor for alignment factor
+
+# ── Persona blend into full_model (reason-conditioned) ──────────
+# aligned_top_n: how many top persona concepts to blend into aligned-reason boost
+# unknown_top_n: same for unknown reason
+# Set to 0 to disable (original behavior — full_model ≈ intent_only)
+persona_blend:
+  aligned_top_n: 0
+  unknown_top_n: 0
+
+# ── Weighted sum baseline parameters ────────────────────────────
+weighted_sum:
+  persona_weight: 0.4
+  intent_weight: 0.6

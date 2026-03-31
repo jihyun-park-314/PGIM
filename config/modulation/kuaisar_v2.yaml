@@ -1,0 +1,104 @@
+# kuaisar_v2.yaml
+# ─────────────────────────────────────────────────────────────────────
+# PGIM-v2: source-aware persona + per-concept weighted modulation
+#
+# Key changes from kuaisar_granular (v1 B-lite):
+#   - v2_blend: reason-conditioned persona/intent weight per concept
+#   - source-aware persona_score = weight × source_alignment
+#   - combined_score per concept replaces uniform overlap ratio
+# ─────────────────────────────────────────────────────────────────────
+mode: graph_conditioned_full
+
+delta:
+  max_boost: 0.30
+  max_suppress: 0.15
+  filter_penalty: 0.50
+
+reason_policy:
+  aligned:
+    boost_scale: 0.8
+    suppress_scale: 0.3
+    filter_active: false
+  exploration:
+    boost_scale: 0.5
+    suppress_scale: 0.1
+    filter_active: false
+  task_focus:
+    boost_scale: 1.0
+    suppress_scale: 0.5
+    filter_active: true
+  budget_shift:
+    boost_scale: 0.7
+    suppress_scale: 0.8
+    filter_active: true
+  unknown:
+    boost_scale: 0.3
+    suppress_scale: 0.1
+    filter_active: false
+
+gate:
+  reason_base_weight:
+    aligned: 0.7
+    exploration: 0.6
+    task_focus: 0.9
+    budget_shift: 0.8
+    unknown: 0.25
+  confidence_power: 1.0
+  alignment_clip_min: 0.05
+
+# ── Concept priority (same as granular) ──────────────────────────────
+concept_priority:
+  cat_l4: 0
+  cat_l3: 1
+  cat_l2: 2
+  cat_l1: 3
+  service: 99
+
+concept_exclude_types:
+  - service
+
+max_boost_concepts: 5
+
+# ── Persona blend (same as granular) ─────────────────────────────────
+persona_blend:
+  aligned_top_n: 0
+  unknown_top_n: 0
+  aligned_finer_top_n: 3
+  exploration_finer_top_n: 0
+
+# ── Concept IDF downweight ────────────────────────────────────────────
+concept_idf:
+  enabled: true
+  idf_path: data/cache/concept_idf/kuaisar/concept_idf.parquet
+  idf_floor: 0.1
+
+# ── v2: per-concept weighted blend ───────────────────────────────────
+# For each reason, defines how persona_score and intent_score are blended
+# into combined_score = persona_weight * persona_score + intent_weight * intent_score
+# Then multiplied by idf(c) for specificity.
+#
+# aligned:     persona is reliable → higher persona weight
+# exploration: intent leads (user is exploring) → higher intent weight, some persona anchor
+# task_focus:  intent is highly specific → intent dominates
+# unknown:     balanced default
+v2_blend:
+  aligned:
+    persona_weight: 0.7
+    intent_weight: 0.3
+  exploration:
+    persona_weight: 0.3
+    intent_weight: 0.7
+  task_focus:
+    persona_weight: 0.2
+    intent_weight: 0.8
+  budget_shift:
+    persona_weight: 0.3
+    intent_weight: 0.7
+  unknown:
+    persona_weight: 0.5
+    intent_weight: 0.5
+
+# ── Weighted sum baseline parameters ─────────────────────────────────
+weighted_sum:
+  persona_weight: 0.4
+  intent_weight: 0.6

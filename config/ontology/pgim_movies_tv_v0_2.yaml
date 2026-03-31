@@ -1,0 +1,456 @@
+ontology:
+  name: pgim_movies_tv_v0_2
+  version: 0.2
+  purpose: >-
+    Lightweight relation-aware ontology for PGIM on Amazon Movies_and_TV.
+    Designed to preserve stable persona, interpret recent deviation, and support
+    reason-conditioned reranking without requiring full ontology reasoning.
+  design_principles:
+    - Separate Content Work from Product Manifestation
+    - Separate SemanticCore from SemanticAnchor, ProductContext, and NoiseMeta
+    - Keep one shared ontology schema but use it differently by long-term/short-term reason
+    - Support minimal relation-aware propagation, not full symbolic reasoning
+    - Prevent semantic and non-semantic concept mixing in persona construction
+
+classes:
+  Work:
+    description: Canonical content entity the user actually likes
+    subclasses:
+      Movie:
+        description: Standalone film work
+      TVSeries:
+        description: Multi-episode or multi-season television series
+      TVSeason:
+        description: Season-level content unit when title-level work mapping is too coarse
+
+  ProductManifestation:
+    description: >-
+      Amazon product-page level entity the user actually interacts with.
+      This may be a DVD, Blu-ray, digital listing, box set, season pack, etc.
+      Interaction items are assumed to be ProductManifestation by default.
+    notes:
+      - User interactions are grounded first to ProductManifestation
+      - Semantic preference should be projected through manifestation_of -> Work
+      - Format/Edition/Price/Channel stay at the ProductManifestation layer unless explicitly needed
+
+  SemanticCore:
+    description: Primary semantic concepts for long-term persona
+    subclasses:
+      Genre:
+        strength: strong_core
+        examples:
+          - Action
+          - Comedy
+          - Drama
+          - Documentary
+          - Horror
+          - SciFi
+          - Romance
+      Subgenre:
+        strength: strong_core
+        examples:
+          - CrimeDrama
+          - PsychologicalThriller
+          - RomanticComedy
+          - SupernaturalHorror
+          - HistoricalDrama
+      Theme:
+        strength: weak_core
+        examples:
+          - War
+          - Family
+          - Friendship
+          - Revenge
+          - ComingOfAge
+          - Politics
+      MoodTone:
+        strength: weak_core
+        examples:
+          - Dark
+          - Lighthearted
+          - Heartwarming
+          - Suspenseful
+          - Gritty
+      Audience:
+        strength: strong_core
+        examples:
+          - Kids
+          - Family
+          - Teen
+          - Adult
+
+  SemanticAnchor:
+    description: Secondary semantic anchors; meaningful but not default persona core
+    subclasses:
+      Franchise:
+        examples:
+          - Marvel
+          - StarWars
+          - HarryPotter
+      Creator:
+        subclasses:
+          Director:
+            examples:
+              - ChristopherNolan
+              - HayaoMiyazaki
+            long_term_weight: medium
+            task_focus_weight: high
+          Actor:
+            examples:
+              - TomHanks
+              - EmmaWatson
+            long_term_weight: low
+            task_focus_weight: medium
+          Writer:
+            examples:
+              - StephenKing
+              - ShondaRhimes
+            long_term_weight: very_low
+            task_focus_weight: low
+      Language:
+        examples:
+          - English
+          - Japanese
+          - Korean
+      CountryRegion:
+        examples:
+          - US
+          - UK
+          - Japan
+          - Korea
+      EraPeriod:
+        examples:
+          - Classic
+          - 1980s
+          - 1990s
+          - 2000s
+
+  ProductContext:
+    description: Purchase/consumption context, not stable persona core by default
+    subclasses:
+      Format:
+        examples:
+          - DVD
+          - BluRay
+          - UHD4K
+          - Digital
+      Edition:
+        examples:
+          - BoxSet
+          - CollectorEdition
+          - SpecialEdition
+          - SeasonPack
+      PriceBand:
+        examples:
+          - Low
+          - Mid
+          - High
+      AvailabilityChannel:
+        examples:
+          - PrimeVideo
+          - DigitalRental
+          - PhysicalMedia
+      PublisherStudio:
+        examples:
+          - WarnerHomeVideo
+          - Criterion
+          - Disney
+
+  NoiseMeta:
+    description: Concepts that must never become stable preference concepts
+    subclasses:
+      NavigationTag:
+        examples:
+          - all_titles
+          - featured_categories
+          - genre_for_featured_categories
+      PromoTag:
+        examples:
+          - todays_deals
+          - featured_deals
+          - studio_specials
+      StorefrontTag:
+        examples:
+          - more_to_explore
+          - best_sellers
+
+grounding_policy:
+  default_interaction_unit: ProductManifestation
+  persona_projection:
+    description: >-
+      Stable persona should be built from Work-level semantic projection whenever possible.
+      Product/page-level context may be stored separately but should not dominate long-term core.
+    rules:
+      - Interaction item is first treated as ProductManifestation
+      - Use manifestation_of to project semantic concepts to Work
+      - Format/Edition/Price/Channel remain manifestation-level context
+      - PublisherStudio never becomes long-term primary taste
+      - NavigationTag / PromoTag / StorefrontTag never enter persona core
+
+relations:
+  hierarchy:
+    - name: is_a
+      domain: AnySubclass
+      range: ParentClass
+      description: Standard subclass relation
+    - name: subgenre_of
+      domain: Subgenre
+      range: Genre
+      description: Subgenre hierarchy relation
+
+  work_semantics:
+    - name: has_genre
+      domain: Work
+      range: Genre
+    - name: has_subgenre
+      domain: Work
+      range: Subgenre
+    - name: has_theme
+      domain: Work
+      range: Theme
+    - name: has_mood
+      domain: Work
+      range: MoodTone
+    - name: target_audience
+      domain: Work
+      range: Audience
+    - name: part_of_franchise
+      domain: Work
+      range: Franchise
+    - name: directed_by
+      domain: Work
+      range: Director
+    - name: starring
+      domain: Work
+      range: Actor
+    - name: written_by
+      domain: Work
+      range: Writer
+    - name: has_language
+      domain: Work
+      range: Language
+    - name: origin_country
+      domain: Work
+      range: CountryRegion
+    - name: release_period
+      domain: Work
+      range: EraPeriod
+
+  manifestation_context:
+    - name: manifestation_of
+      domain: ProductManifestation
+      range: Work
+      description: Product manifestation of a canonical work
+    - name: has_format
+      domain: ProductManifestation
+      range: Format
+    - name: has_edition
+      domain: ProductManifestation
+      range: Edition
+    - name: available_on
+      domain: ProductManifestation
+      range: AvailabilityChannel
+    - name: published_by
+      domain: ProductManifestation
+      range: PublisherStudio
+    - name: has_price_band
+      domain: ProductManifestation
+      range: PriceBand
+
+propagation_policy:
+  - relation: subgenre_of
+    policy: upward_propagation
+    strength: 0.5
+    note: Subgenre evidence may weakly activate its parent Genre
+  - relation: manifestation_of
+    policy: semantic_projection_allowed
+    strength: 1.0
+    note: ProductManifestation may project semantic preference to Work
+  - relation: has_format
+    policy: no_core_propagation
+    strength: 0.0
+    note: Format updates only ProductContext, never SemanticCore
+  - relation: has_edition
+    policy: task_context_only
+    strength: 0.2
+    note: Edition may affect short-term task focus but not stable core by default
+  - relation: available_on
+    policy: channel_context_only
+    strength: 0.1
+    note: AvailabilityChannel is short-term consumption context, not long-term taste
+  - relation: published_by
+    policy: no_core_propagation
+    strength: 0.0
+    note: PublisherStudio must never propagate into stable semantic persona core
+  - relation: part_of_franchise
+    policy: anchor_propagation
+    strength: 0.3
+    note: Franchise is a semantic anchor, not direct Genre propagation
+  - relation: directed_by
+    policy: anchor_propagation
+    strength: 0.25
+    note: Director may support anchor preference but should not dominate core
+  - relation: starring
+    policy: weak_anchor_propagation
+    strength: 0.15
+    note: Actor preference is allowed as weak anchor only
+
+usage_policy:
+  long_term_persona:
+    description: Stable persona prior should focus on semantic core and keep anchors weak
+    primary_allowed:
+      - Genre
+      - Subgenre
+      - Audience
+    secondary_allowed:
+      - Theme
+      - MoodTone
+      - Franchise
+      - Director
+      - Language
+      - CountryRegion
+      - EraPeriod
+    tertiary_allowed:
+      - Actor
+    excluded:
+      - Format
+      - Edition
+      - PriceBand
+      - AvailabilityChannel
+      - PublisherStudio
+      - NavigationTag
+      - PromoTag
+      - StorefrontTag
+
+  short_term_reason_usage:
+    aligned:
+      primary_allowed:
+        - Genre
+        - Subgenre
+        - Audience
+      secondary_allowed:
+        - Theme
+        - MoodTone
+        - Franchise
+        - Director
+        - Actor
+      excluded:
+        - NavigationTag
+        - PromoTag
+        - StorefrontTag
+
+    exploration:
+      primary_allowed:
+        - Genre
+        - Subgenre
+        - Audience
+      secondary_allowed:
+        - Theme
+        - MoodTone
+        - Language
+        - CountryRegion
+      excluded:
+        - Franchise
+        - Creator
+        - Format
+        - Edition
+        - AvailabilityChannel
+        - PublisherStudio
+        - NavigationTag
+        - PromoTag
+        - StorefrontTag
+
+    task_focus:
+      description: >-
+        task_focus may be content-focused or purchase-focused, but both stay under one label.
+        Use weighting differences internally rather than introducing a new taxonomy now.
+      content_focus_primary:
+        - Genre
+        - Subgenre
+        - Franchise
+        - Director
+        - Actor
+      purchase_focus_primary:
+        - Edition
+        - Format
+        - AvailabilityChannel
+      secondary_allowed:
+        - Theme
+        - MoodTone
+        - Audience
+      excluded:
+        - NavigationTag
+        - PromoTag
+        - StorefrontTag
+
+    budget_shift:
+      description: >-
+        budget_shift should suppress semantic preference, not delete it.
+      primary_allowed:
+        - PriceBand
+        - Format
+        - Edition
+        - AvailabilityChannel
+      secondary_allowed:
+        - Genre
+        - Subgenre
+      excluded:
+        - Franchise
+        - Creator
+        - NavigationTag
+        - PromoTag
+        - StorefrontTag
+
+    unknown:
+      primary_allowed:
+        - Genre
+        - Subgenre
+      secondary_allowed: []
+      excluded:
+        - Franchise
+        - Creator
+        - Format
+        - Edition
+        - AvailabilityChannel
+        - PublisherStudio
+        - NavigationTag
+        - PromoTag
+        - StorefrontTag
+
+validation_rules:
+  - rule: NoiseMeta_never_in_long_term_core
+    description: NavigationTag, PromoTag, and StorefrontTag must never enter stable persona core
+  - rule: ProductContext_never_primary_long_term
+    description: Format, Edition, PriceBand, AvailabilityChannel, PublisherStudio cannot be long-term primary
+  - rule: PublisherStudio_never_goal_primary
+    description: PublisherStudio cannot be a primary goal concept
+  - rule: Navigation_and_Promo_never_goal
+    description: NavigationTag, PromoTag, StorefrontTag cannot appear in goal_concepts
+  - rule: Exploration_no_ProductContext_primary
+    description: Exploration should not primarily rely on Format/Edition/Channel
+  - rule: Unknown_no_ProductContext
+    description: Unknown reason should not use ProductContext as main evidence
+  - rule: manifestation_required_for_product_items
+    description: ProductManifestation should project to Work when semantic preference is updated
+
+implementation_priority:
+  phase_1_now:
+    - Add ProductManifestation as explicit top-level class
+    - Apply Work vs Product grounding policy in documentation and code hooks
+    - Re-map current concept roles into SemanticCore / SemanticAnchor / ProductContext / NoiseMeta
+    - Update reason-conditional usage policy in interpreter and persona builder
+  phase_2_next:
+    - Add minimal subgenre_of and manifestation_of propagation
+    - Split collection concepts into Franchise / Edition / NoiseMeta where possible
+    - Add lightweight validation checks for illegal concept usage
+  phase_3_later:
+    - Creator subclass weighting refinement
+    - Franchise / Edition canonicalization
+    - External KB enrichment
+    - Stronger relation-aware similarity
+
+notes:
+  - This is not a full OWL ontology or reasoning engine.
+  - Theme and MoodTone are retained but treated as weak-core concepts.
+  - PrimeVideo should be treated as AvailabilityChannel context, not stable persona taste.
+  - The immediate goal is operational clarity for PGIM, not ontology completeness.

@@ -1,0 +1,49 @@
+# Intent config for KuaiSAR
+# KuaiSAR has 4-level category hierarchy (cat_l1..cat_l4), service concept,
+# no price/brand/item_form/skin_type.
+
+# ── Deviation reason thresholds ──────────────────────────────────
+deviation:
+  aligned_overlap_threshold: 0.4
+  exploration_entropy_threshold: 0.6
+  task_focus_dominance_threshold: 0.5
+  budget_shift_min_persona_support: 2
+
+# ── Confidence defaults by source ────────────────────────────────
+confidence:
+  aligned: 0.75
+  exploration: 0.55
+  task_focus: 0.65
+  budget_shift: 0.60
+  unknown: 0.35
+  llm_base: 0.80
+
+# ── TTL (in recommendation steps) ────────────────────────────────
+ttl:
+  aligned: 3
+  exploration: 1
+  task_focus: 2
+  budget_shift: 2
+  unknown: 1
+
+# ── Context feature extraction ───────────────────────────────────
+context:
+  top_goal_concepts: 3
+  # KuaiSAR concept types: cat_l1/l2/l3/l4 are the primary signals
+  # service concept captures search vs rec pattern
+  signal_concept_types:
+    - cat_l1
+    - cat_l2
+    - cat_l3
+    - service
+
+# ── Cache policy ─────────────────────────────────────────────────
+cache:
+  default_interpreter: heuristic
+
+# ── LLM ──────────────────────────────────────────────────────────
+llm:
+  use_llm: false
+  model: gpt-4o-mini
+  timeout_seconds: 5
+  max_retries: 1

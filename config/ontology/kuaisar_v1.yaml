@@ -1,0 +1,29 @@
+# Ontology grounding config for KuaiSAR
+# KuaiSAR has a 4-level category hierarchy (English names available)
+# and no price/brand/detail fields → different concept sources than Amazon.
+
+category_delimiter: " > "
+
+# KuaiSAR has no price field → price_band always unknown, skip entirely
+skip_price_band: true
+
+# KuaiSAR has no brand field → skip
+skip_brand: true
+
+# Category depth: how many levels to ground (1=coarse only, 4=all levels)
+# Levels: first > second > third > fourth
+max_category_depth: 4
+
+# Concept prefix per level
+category_level_prefix:
+  0: "cat_l1"   # first_level_category_name_en
+  1: "cat_l2"   # second_level_category_name_en
+  2: "cat_l3"   # third_level_category_name_en
+  3: "cat_l4"   # fourth_level_category_name_en
+
+# Normalize: lowercase + underscore
+normalize: true
+
+# Source service concept: ground source_service as a concept
+# so persona/intent can distinguish search vs rec patterns
+add_source_service_concept: true

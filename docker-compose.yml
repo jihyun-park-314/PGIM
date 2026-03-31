@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  pgim:
+    container_name: pgim
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./src:/pgim/src
+      - ./config:/pgim/config
+      - ./data:/pgim/data
+    environment:
+      - PYTHONPATH=/pgim
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true

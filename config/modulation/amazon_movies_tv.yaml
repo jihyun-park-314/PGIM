@@ -1,0 +1,119 @@
+# amazon_movies_tv.yaml  (v2)
+# ─────────────────────────────────────────────────────────────────────
+# Changes from v1:
+#   - filter_active disabled for all reasons (was causing GT to be
+#     penalized at 84-99% rate in task_focus/budget_shift)
+#   - suppress_scale reduced (soft signal, not hard gate)
+#   - v2_blend added: persona signal now participates in full_model
+#     delta via ContextualConceptSignal weighted path
+# ─────────────────────────────────────────────────────────────────────
+mode: graph_conditioned_full
+
+delta:
+  max_boost: 0.30
+  max_suppress: 0.10
+  filter_penalty: 0.20      # reduced from 0.50; filter_active=false anyway
+
+reason_policy:
+  aligned:
+    boost_scale: 0.8
+    suppress_scale: 0.1
+    filter_active: false
+  exploration:
+    boost_scale: 0.5
+    suppress_scale: 0.05
+    filter_active: false
+  task_focus:
+    boost_scale: 1.0
+    suppress_scale: 0.2     # reduced from 0.5
+    filter_active: false    # was true — caused GT penalty 84%
+  budget_shift:
+    boost_scale: 0.7
+    suppress_scale: 0.2     # reduced from 0.8
+    filter_active: false    # was true — caused GT penalty 99%
+  unknown:
+    boost_scale: 0.3
+    suppress_scale: 0.05
+    filter_active: false
+
+gate:
+  reason_base_weight:
+    aligned: 0.7
+    exploration: 0.6
+    task_focus: 0.9
+    budget_shift: 0.8
+    unknown: 0.25
+  confidence_power: 1.0
+  alignment_clip_min: 0.05
+
+# ── Persona blend (v1 path: adds persona concepts to boost list) ──────
+persona_blend:
+  aligned_top_n: 0
+  unknown_top_n: 0
+  aligned_finer_top_n: 3
+  exploration_finer_top_n: 0
+
+# ── v2 blend: persona/intent weighted delta path ──────────────────────
+# Enables ContextualConceptSignal in signal_builder for full_model.
+# persona_weight / intent_weight control the combined_score blend
+# per concept, conditioned on deviation_reason.
+v2_blend:
+  aligned:
+    persona_weight: 0.7
+    intent_weight: 0.3
+  exploration:
+    persona_weight: 0.6
+    intent_weight: 0.4
+  task_focus:
+    persona_weight: 0.3
+    intent_weight: 0.7
+  budget_shift:
+    persona_weight: 0.4
+    intent_weight: 0.6
+  unknown:
+    persona_weight: 0.8
+    intent_weight: 0.2
+
+max_boost_concepts: 10
+
+# ── Ontology zone weights ─────────────────────────────────────────────
+# Applied as a multiplier to p_score (persona score) per concept,
+# conditioned on deviation_reason × ontology zone.
+# NoiseMeta is always 0.0 (hard block — same as existing exclusion logic).
+# Values are intentionally modest to avoid large reranking disruption.
+zone_weights:
+  enabled: false
+  aligned:
+    SemanticCore:    1.0
+    SemanticAnchor:  0.9
+    ProductContext:  0.6
+    NoiseMeta:       0.0
+  exploration:
+    SemanticCore:    1.0
+    SemanticAnchor:  0.6
+    ProductContext:  0.3
+    NoiseMeta:       0.0
+  task_focus:
+    SemanticCore:    1.0
+    SemanticAnchor:  1.2
+    ProductContext:  1.1
+    NoiseMeta:       0.0
+  budget_shift:
+    SemanticCore:    0.6
+    SemanticAnchor:  0.6
+    ProductContext:  1.3
+    NoiseMeta:       0.0
+  unknown:
+    SemanticCore:    1.0
+    SemanticAnchor:  0.7
+    ProductContext:  0.5
+    NoiseMeta:       0.0
+
+# ── Concept IDF downweight ───────────────────────────────────────────
+concept_idf:
+  enabled: false
+
+# ── Weighted sum baseline ────────────────────────────────────────────
+weighted_sum:
+  persona_weight: 0.4
+  intent_weight: 0.6

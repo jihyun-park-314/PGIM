@@ -1,0 +1,3 @@
+experiment,gt_coverage,n_users,HR@5,NDCG@5,HR@10,NDCG@10,HR@20,NDCG@20,MRR
+ablation_intent_only,1.0,2000,0.487,0.3671,0.6095,0.4068,0.75,0.4418,0.3596
+full_model,1.0,2000,0.491,0.3706,0.615,0.411,0.7525,0.4454,0.3632

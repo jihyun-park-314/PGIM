@@ -1,0 +1,31 @@
+model: sasrec
+
+# backbone_mode: cooccurrence | popularity | trained_sasrec
+# Omit to auto-detect from use_trained_model flag (back-compat)
+backbone_mode: cooccurrence
+
+# Candidate retrieval
+top_k: 100
+
+# Popularity fallback
+fallback:
+  policy: popularity
+  min_sequence_length: 2
+
+# ── SASRec model hyperparameters ──────────────────────────────────────────────
+model_dim: 64
+num_blocks: 2
+num_heads: 2
+dropout: 0.2
+max_seq_len: 50
+
+# ── Training ──────────────────────────────────────────────────────────────────
+batch_size: 128
+num_epochs: 100
+learning_rate: 0.001
+early_stopping_patience: 10
+eval_ndcg_k: 10
+
+# ── Inference toggle ──────────────────────────────────────────────────────────
+use_trained_model: false
+checkpoint_path: data/checkpoints/processed/sasrec_best.pt   # NDCG@10=0.0824 (epoch 10)

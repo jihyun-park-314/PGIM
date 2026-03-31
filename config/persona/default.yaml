@@ -1,0 +1,20 @@
+# Decay
+decay:
+  half_life_days: 30      # weight halves every 30 days
+  min_weight: 0.01        # floor: nodes below this are pruned on save
+
+# Persona graph construction
+persona:
+  top_k_concepts: 50      # max nodes kept per user (by weight)
+  min_support: 2          # concept must appear >= N times to be included
+  stability_window_days: 14   # window for stability score calculation
+
+# Contradiction detection
+contradiction:
+  top_k_reference: 10     # top-K long-term concepts to compare against
+  recent_window_size: 5   # how many recent interactions define "recent"
+
+# Eval window exclusion
+eval_exclusion:
+  mode: tail_n            # "tail_n" | "after_timestamp"
+  tail_n: 1               # exclude last N interactions per user from persona

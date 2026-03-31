@@ -1,0 +1,29 @@
+backbone_mode: trained_sasrec
+top_k: 100
+
+# Fallback when sequence is too short or checkpoint missing
+fallback:
+  policy: popularity
+  min_sequence_length: 3
+
+# ── SASRec model hyperparameters ──────────────────────────────────────────────
+# KuaiSAR: 121k items, 3.5M interactions, avg seq len ~175
+# Larger model than Amazon Beauty (1.2k items)
+model_dim: 128
+num_blocks: 2
+num_heads: 2
+dropout: 0.2
+max_seq_len: 50
+
+# ── Training ──────────────────────────────────────────────────────────────────
+batch_size: 512
+num_epochs: 200
+learning_rate: 0.001
+l2_emb: 0.0
+early_stopping_patience: 10
+eval_ndcg_k: 10
+
+# ── Inference ─────────────────────────────────────────────────────────────────
+use_trained_model: true
+checkpoint_path: data/checkpoints/kuaisar/sasrec_best.pt     # set automatically after training by run_train.py
+popularity_source: all

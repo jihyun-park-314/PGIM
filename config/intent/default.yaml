@@ -1,0 +1,55 @@
+# ── Deviation reason thresholds ──────────────────────────────────
+deviation:
+  # fraction of recent concepts that must overlap persona top-K to be "aligned"
+  aligned_overlap_threshold: 0.4
+
+  # if overlap < aligned threshold AND concept entropy > this -> "exploration"
+  exploration_entropy_threshold: 0.6
+
+  # if a single non-category concept_type accounts for >= this fraction -> "task_focus"
+  task_focus_dominance_threshold: 0.5
+
+  # price_band shift: recent dominant band differs from persona dominant band
+  # and persona dominant band is not "unknown"
+  budget_shift_min_persona_support: 2   # persona must have >= N interactions with a known band
+
+# ── Confidence defaults by source ────────────────────────────────
+confidence:
+  aligned: 0.75
+  exploration: 0.55
+  task_focus: 0.65
+  budget_shift: 0.60
+  unknown: 0.35
+  llm_base: 0.80      # starting confidence for LLM output (before validation adjustment)
+
+# ── TTL (in recommendation steps) ────────────────────────────────
+ttl:
+  aligned: 3
+  exploration: 1
+  task_focus: 2
+  budget_shift: 2
+  unknown: 1
+
+# ── Context feature extraction ───────────────────────────────────
+context:
+  # top-N concepts by frequency to use as "goal concepts"
+  top_goal_concepts: 3
+  # concept types to use for persona alignment comparison
+  # category is excluded because it's almost entirely "all_beauty" in this dataset
+  signal_concept_types:
+    - brand
+    - price_band
+    - item_form
+    - skin_type
+
+# ── Cache policy ─────────────────────────────────────────────────
+cache:
+  # "heuristic" | "llm" — default interpreter when cache miss
+  default_interpreter: heuristic
+
+# ── LLM (optional, only used when cache.default_interpreter = llm) ──
+llm:
+  use_llm: false
+  model: gpt-4o-mini
+  timeout_seconds: 5
+  max_retries: 1

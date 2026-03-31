@@ -1,0 +1,9 @@
+metrics:
+  - hit_rate
+  - ndcg
+  - mrr
+
+k_values: [5, 10, 20]
+
+# eval split: use last interaction per user as test target
+eval_split: leave_one_out

@@ -1,0 +1,7 @@
+defaults:
+  - backbone: sasrec
+  - modulation: default
+  - evaluation: default
+
+experiment_name: ablation_persona_only
+modulation_mode: persona_only_rerank

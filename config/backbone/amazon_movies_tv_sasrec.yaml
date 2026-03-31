@@ -1,0 +1,30 @@
+model: sasrec
+
+# backbone_mode: cooccurrence | popularity | trained_sasrec
+backbone_mode: popularity
+
+# Candidate retrieval
+top_k: 100
+
+# Popularity fallback
+fallback:
+  policy: popularity
+  min_sequence_length: 2
+
+# ── SASRec model hyperparameters ──────────────────────────────────────────────
+model_dim: 128
+num_blocks: 2
+num_heads: 2
+dropout: 0.2
+max_seq_len: 50
+
+# ── Training ──────────────────────────────────────────────────────────────────
+batch_size: 256
+num_epochs: 100
+learning_rate: 0.001
+early_stopping_patience: 10
+eval_ndcg_k: 10
+
+# ── Inference toggle ──────────────────────────────────────────────────────────
+use_trained_model: false
+checkpoint_path: data/checkpoints/amazon_movies_tv/sasrec_best.pt

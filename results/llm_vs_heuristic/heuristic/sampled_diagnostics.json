@@ -1,0 +1,42 @@
+{
+  "ablation_intent_only": {
+    "gt_coverage": 1.0,
+    "n_users": 2000,
+    "reason_dist": {
+      "exploration": 992,
+      "aligned": 761,
+      "task_focus": 133,
+      "budget_shift": 114
+    },
+    "rank_movement": {
+      "improved": 618,
+      "same": 1172,
+      "worsened": 210
+    },
+    "delta_stats": {
+      "all_nonzero_frac": 0.6379,
+      "gt_item_mean_delta": 0.03826,
+      "gt_item_positive_frac": 0.94
+    }
+  },
+  "full_model": {
+    "gt_coverage": 1.0,
+    "n_users": 2000,
+    "reason_dist": {
+      "exploration": 992,
+      "aligned": 761,
+      "task_focus": 133,
+      "budget_shift": 114
+    },
+    "rank_movement": {
+      "improved": 816,
+      "same": 996,
+      "worsened": 188
+    },
+    "delta_stats": {
+      "all_nonzero_frac": 0.6562,
+      "gt_item_mean_delta": 0.045304,
+      "gt_item_positive_frac": 0.946
+    }
+  }
+}

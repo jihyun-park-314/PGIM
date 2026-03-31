@@ -1,0 +1,36 @@
+# ── Core ──────────────────────────────────────────────────────────
+numpy>=1.26,<2.0
+scipy>=1.12
+
+# ── Data handling ──────────────────────────────────────────────────
+pandas>=2.2
+pyarrow>=15.0          # parquet I/O for interim/processed data
+
+# ── Config ─────────────────────────────────────────────────────────
+omegaconf>=2.3         # yaml config + experiment override
+hydra-core>=1.3        # config composition (optional, can drop if using omegaconf directly)
+
+# ── ML / backbone ──────────────────────────────────────────────────
+torch>=2.2,<3.0        # CPU build by default; GPU via docker run --gpus or local install
+# torch installed without CUDA extras — override in GPU env:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# ── Graph ──────────────────────────────────────────────────────────
+networkx>=3.2          # PersonaGraph structure (lightweight, no native dep)
+
+# ── LLM API client ─────────────────────────────────────────────────
+openai>=1.30           # covers GPT-* and compatible endpoints
+anthropic>=0.25        # Claude API; remove if not used
+
+# ── Schema / validation ────────────────────────────────────────────
+pydantic>=2.6          # structured output validation (IntentParser, schema checks)
+
+# ── Serialization ──────────────────────────────────────────────────
+orjson>=3.10           # fast JSON I/O for cache read/write
+
+# ── Utilities ──────────────────────────────────────────────────────
+tqdm>=4.66             # progress bars for offline batch jobs
+python-dotenv>=1.0     # .env loading
+
+# ── Evaluation ─────────────────────────────────────────────────────
+scikit-learn>=1.4      # ranking metrics helpers

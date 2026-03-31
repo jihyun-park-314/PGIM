@@ -1,0 +1,72 @@
+# tuning_base — current v2 config, used as sweep baseline
+# v2_blend: exploration persona_weight=0.6 (unchanged)
+mode: graph_conditioned_full
+
+delta:
+  max_boost: 0.30
+  max_suppress: 0.10
+  filter_penalty: 0.20
+
+reason_policy:
+  aligned:
+    boost_scale: 0.8
+    suppress_scale: 0.1
+    filter_active: false
+  exploration:
+    boost_scale: 0.5
+    suppress_scale: 0.05
+    filter_active: false
+  task_focus:
+    boost_scale: 1.0
+    suppress_scale: 0.2
+    filter_active: false
+  budget_shift:
+    boost_scale: 0.7
+    suppress_scale: 0.2
+    filter_active: false
+  unknown:
+    boost_scale: 0.3
+    suppress_scale: 0.05
+    filter_active: false
+
+gate:
+  reason_base_weight:
+    aligned: 0.7
+    exploration: 0.6
+    task_focus: 0.9
+    budget_shift: 0.8
+    unknown: 0.25
+  confidence_power: 1.0
+  alignment_clip_min: 0.05
+
+persona_blend:
+  aligned_top_n: 0
+  unknown_top_n: 0
+  aligned_finer_top_n: 3
+  exploration_finer_top_n: 0
+
+v2_blend:
+  aligned:
+    persona_weight: 0.7
+    intent_weight: 0.3
+  exploration:
+    persona_weight: 0.6
+    intent_weight: 0.4
+  task_focus:
+    persona_weight: 0.3
+    intent_weight: 0.7
+  budget_shift:
+    persona_weight: 0.4
+    intent_weight: 0.6
+  unknown:
+    persona_weight: 0.8
+    intent_weight: 0.2
+
+max_boost_concepts: 10
+
+concept_idf:
+  enabled: false
+
+weighted_sum:
+  persona_weight: 0.4
+  intent_weight: 0.6

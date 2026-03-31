@@ -1,0 +1,86 @@
+# kuaisar_granular.yaml
+# ─────────────────────────────────────────────────────────────────────
+# B-lite: finer concept priority + service exclusion + IDF downweight
+# Goal: make reranking signal more discriminative in KuaiSAR
+# ─────────────────────────────────────────────────────────────────────
+mode: graph_conditioned_full
+
+delta:
+  max_boost: 0.30
+  max_suppress: 0.15
+  filter_penalty: 0.50
+
+reason_policy:
+  aligned:
+    boost_scale: 0.8
+    suppress_scale: 0.3
+    filter_active: false
+  exploration:
+    boost_scale: 0.5
+    suppress_scale: 0.1
+    filter_active: false
+  task_focus:
+    boost_scale: 1.0
+    suppress_scale: 0.5
+    filter_active: true
+  budget_shift:
+    boost_scale: 0.7
+    suppress_scale: 0.8
+    filter_active: true
+  unknown:
+    boost_scale: 0.3
+    suppress_scale: 0.1
+    filter_active: false
+
+gate:
+  reason_base_weight:
+    aligned: 0.7
+    exploration: 0.6
+    task_focus: 0.9
+    budget_shift: 0.8
+    unknown: 0.25
+  confidence_power: 1.0
+  alignment_clip_min: 0.05
+
+# ── Concept priority (KuaiSAR-specific) ──────────────────────────────
+# Controls ordering and selection of boost_concepts.
+# Lower number = higher priority.
+concept_priority:
+  cat_l4: 0        # finest grain (~8 items median) — highest priority
+  cat_l3: 1        # fine grain (~14 items median)
+  cat_l2: 2        # medium grain (~52 items median)
+  cat_l1: 3        # broad (~1626 items median) — low priority
+  service: 99      # service:rec/search spans 60k+ items — effectively excluded
+
+# concept types to exclude entirely from boost (too broad to discriminate)
+concept_exclude_types:
+  - service
+
+# max boost_concepts to use (finer concepts fill first)
+max_boost_concepts: 5
+
+# ── Persona blend (finer-concept-first) ──────────────────────────────
+# aligned: pull cat_l3/l4 concepts from persona into boost
+# exploration: no blend (intent leads)
+persona_blend:
+  aligned_top_n: 0        # general persona blend (old mechanism, keep 0)
+  unknown_top_n: 0
+  # NEW: finer-first persona blend for aligned/exploration
+  aligned_finer_top_n: 3  # pull top-3 persona cat_l3/l4 into aligned boost
+  exploration_finer_top_n: 0
+
+# ── Concept IDF downweight ────────────────────────────────────────────
+# Concepts shared by many items get lower effective boost weight.
+# Applied multiplicatively in reranker: effective_boost = boost * idf_weight
+# idf_weight = log(N / df) / log(N)   clipped to [idf_floor, 1.0]
+concept_idf:
+  enabled: true
+  # path to precomputed concept_idf.parquet (concept_id, idf_weight)
+  # built by build_concept_idf() in signal_builder
+  idf_path: data/cache/concept_idf/kuaisar/concept_idf.parquet
+  idf_floor: 0.1   # minimum weight even for most common concepts
+
+# ── Weighted sum baseline parameters ─────────────────────────────────
+weighted_sum:
+  persona_weight: 0.4
+  intent_weight: 0.6

@@ -1,0 +1,8 @@
+backbone_mode: popularity
+top_k: 100
+
+# Popularity source: all / rec / search
+# "all" = combined rec + search interactions
+# "rec" = recommendation service only
+# "search" = search service only
+popularity_source: all
