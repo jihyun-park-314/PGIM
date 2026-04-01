@@ -416,6 +416,7 @@ def main() -> None:
     _list_cols = (
         "goal_concepts", "evidence_item_ids", "raw_llm_goals", "validated_goal_concepts",
         "evidence_recent_concepts", "evidence_persona_concepts", "pre_grounding_goal_text",
+        "removed_non_semantic_goals",
     )
     for _list_col in _list_cols:
         if _list_col in df_intents.columns:

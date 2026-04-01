@@ -50,7 +50,7 @@ import logging
 from typing import Any, Optional
 
 from src.intent.context_extractor import IntentContext
-from src.intent.concept_roles import is_goal_eligible
+from src.intent.concept_roles import is_goal_eligible, is_semantic_goal, filter_non_semantic_goals
 from src.intent.grounded_selector import validate_and_select_goals
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,8 @@ logger = logging.getLogger(__name__)
 VALID_REASONS = {"aligned", "exploration", "task_focus", "budget_shift", "unknown"}
 
 # ── Versioning — bump when prompt schema or injected fields change ─────────────
-LLM_PROMPT_VERSION = "v3_rationale"   # was v2 (grounded selector); v3 adds rationale slots
-SCHEMA_VERSION     = "3.0"            # parquet schema version for downstream compat checks
+LLM_PROMPT_VERSION = "v5_semantic_goal_hygiene"  # v5: strict semantic-only goal slot + v4 reason calibration
+SCHEMA_VERSION     = "3.0"                       # parquet schema version for downstream compat checks
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 _SYSTEM_PROMPT = """\
@@ -73,10 +73,16 @@ what the user is specifically interested in RIGHT NOW, and how it differs from t
 OUTPUT RULES (strictly enforced)
 ════════════════════════════════════════════════════════════
 1. goal_concepts: select 1–4 items from candidate_concepts ONLY. Do not invent IDs.
-   - Prefer category/subcategory concepts (e.g. category:action, category:drama)
-   - Put price_band:* and format:* into constraints, not goal_concepts
+   - Prefer SEMANTIC genre/subgenre/theme/mood concepts (e.g. category:action, category:drama)
+   - NEVER put price_band:* or format:* in goal_concepts — these go into constraints only
+   - NEVER put platform/container concepts in goal_concepts:
+     price_band:unknown, price_band:low, price_band:high → constraints only
+     format:dvd, format:blu-ray → constraints only
+     category:prime_video, category:movies_&_tv, category:featured_categories → FORBIDDEN in goal slot
+   - If semantic signal is absent, return goal_concepts: [] (empty list is valid)
    - If a more specific subcategory exists, prefer it over a broad category
 2. constraints: dict with keys "price_band" and/or "format" if clearly present; else {}
+   - price/format information MUST go here, not into goal_concepts
 3. deviation_reason: exactly one of the 5 values below
 4. confidence: be conservative — reserve 0.85+ for very clear cases only
 5. Return ONLY valid JSON, no markdown, no free text outside JSON values
@@ -124,27 +130,46 @@ Step 2 — Check task_focus SECOND (before aligned/exploration):
   → goal_concepts for task_focus: pick the 1–2 dominant semantic concepts from recent.
 
 Step 3 — Distinguish aligned vs exploration:
-  → DEFAULT RULE: if recent dominant concepts substantially overlap with persona top
-    concepts AND there is no evidence of a distinctly narrowed short-term objective
-    beyond normal repeated consumption, choose aligned.
-  → aligned when ALL of the following are true:
-      (a) semantic_overlap_ratio >= 0.55
-      (b) recent top concepts are already well-represented in persona top concepts
-          (the user is watching what they normally watch)
-      (c) no strong drift toward a new category direction
-      (d) if semantic_top_dominance >= 0.45, the concentrated concept is already persona's top concept
-          (repetition inside persona corridor, not a new narrow drill)
-  → exploration when ANY of the following:
-      (a) semantic_overlap_ratio < 0.55
-      (b) recent concepts include several categories NOT in persona top concepts
-      (c) recent semantic concept spread is wide (many different concept_ids, each with low count,
-          semantic_top_dominance < 0.35)
-      (d) recent behavior drifts toward a subcategory/genre the persona rarely shows,
-          but without strong concentration (otherwise → task_focus)
-  → Do NOT classify as aligned just because broad category is the same — if recent
-    drifts into a new subcategory direction, that is exploration or task_focus.
-  → Do NOT classify as exploration when semantic_top_dominance >= 0.45 AND the concentrated
-    concept is outside the persona's usual range — use task_focus instead.
+  → DEFAULT RULE: when in doubt between aligned and exploration, choose aligned.
+    Exploration requires POSITIVE evidence of genuine semantic drift — not merely
+    low overlap or a few unfamiliar concepts.
+
+  → aligned when ANY of the following:
+      (a) semantic_overlap_ratio >= 0.40 AND no repeated drift concepts outside persona
+          (recent is substantially within the persona's known territory)
+      (b) recent top concepts are broad/generic (drama, comedy, action, movies_&_tv)
+          and the persona covers those same broad categories — broad category overlap
+          is NOT exploration even at low counts
+      (c) only format/price/platform differences exist but semantic categories are
+          persona-consistent — format or price change alone is NOT exploration
+      (d) semantic signal is sparse (≤ 3 distinct semantic concepts) AND what little
+          signal exists overlaps persona — default to aligned, not exploration
+
+  → exploration ONLY when ALL of the following are true:
+      (A) SEMANTIC NOVELTY: recent contains specific genre/theme concepts that are
+          NOT in persona top-10 (not just "different broad category" but genuinely
+          unfamiliar territory for this user)
+      (B) REPEATED SIGNAL: the novel concept(s) appear with count >= 2, OR multiple
+          distinct novel concepts appear (not just a single count=1 outlier)
+      (C) NOT EXPLAINABLE by task_focus or budget_shift:
+          - if concentration is high (dom >= 0.45) → use task_focus instead
+          - if price_band_shift is the dominant difference → use budget_shift instead
+      (D) NOT just generic container drift:
+          - drift concepts are NOT umbrella/platform/navigation/format_meta/promo
+          - "user watched drama this week instead of action" is aligned, not exploration
+          - broad-to-broad shift (drama ↔ comedy ↔ action) is aligned unless
+            a genuinely specific non-persona concept (e.g. category:western,
+            category:anime) appears with count >= 2
+
+  → Do NOT use exploration for:
+      - Concept count=1 outliers in an otherwise persona-consistent window
+      - Users whose recent is dominated by platform anchors (prime_video, dvd, blu-ray)
+        with only sparse semantic signal → prefer aligned or unknown
+      - Simple rotation within known broad categories the persona already covers
+      - Cases where the only "new" concepts are generic/umbrella ones
+
+  → Do NOT classify as exploration when semantic_top_dominance >= 0.45 AND the
+    concentrated concept is outside the persona — use task_focus instead.
 
 ════════════════════════════════════════════════════════════
 EXPLORATION GOAL_CONCEPT SELECTION RULE (required when deviation_reason=exploration)
@@ -210,11 +235,19 @@ EXAMPLE D — aligned:
   persona: drama, action, thriller | recent: drama(4), action(3), thriller(2) | dom=0.44 overlap=0.75
   → aligned
 
-EXAMPLE E — exploration (platform-dominant + sparse drift):
+EXAMPLE E — unknown (platform-dominant + only count=1 drift):
   persona: drama, action, comedy, thriller, mystery | recent: prime_video(10), suspense(1), western(1)
   dom=0.71 (platform, NOT content) overlap=0.20
-  → exploration; goal=[category:suspense, category:western]; conf=0.55
-  NOTE: dom=0.71 on prime_video does NOT qualify as task_focus — platform anchor, not content genre
+  → unknown; conf=0.35
+  NOTE: suspense(1) and western(1) are single-occurrence outliers — NOT repeated signal.
+        Do NOT call this exploration. Platform dominance + count=1 drift = insufficient evidence.
+        Use unknown (weak signal) rather than forcing a low-confidence exploration guess.
+
+EXAMPLE F — exploration (genuine specific drift with repeated signal):
+  persona: drama, action, comedy | recent: anime(3), animation(2), sci-fi(1) | dom=0.38 overlap=0.10
+  drift=[anime, comedy(1)] specific novel: anime(3) animation(2), both count>=2, NOT in persona top-10
+  → exploration; goal=[category:anime, category:animation]; conf=0.65
+  NOTE: anime and animation appear with count>=2, are specific (non-umbrella), outside persona top-10.
 
 ════════════════════════════════════════════════════════════
 CONFIDENCE CALIBRATION
@@ -386,11 +419,14 @@ def _build_user_prompt(ctx: IntentContext, candidate_concepts: list[str], compac
         f"Recent format: {r_fmt}  |  Persona format: {p_fmt}",
         "",
         "── SEMANTIC ALIGNMENT GUIDANCE ───────────────────────────",
-        "  → USE semantic_overlap_ratio and semantic_top_dominance for classification",
-        "  → semantic_overlap >= 0.55 AND sem_top_dom < 0.45 AND no drift → aligned",
-        "  → sem_top_dom >= 0.45 AND sem_top1 NOT in semantic persona → task_focus",
-        "  → sem_top_dom < 0.45 AND drift concepts exist → exploration",
-        "  → sem_top_dom < 0.45 AND sem_overlap >= 0.55 → aligned",
+        "  → DEFAULT: choose aligned when uncertain. Exploration needs POSITIVE evidence.",
+        "  → aligned:      overlap >= 0.40 OR drift is only broad/generic OR sparse signal",
+        "  → task_focus:   sem_top_dom >= 0.45 AND top-1 NOT in semantic persona top-10",
+        "  → budget_shift: price_band_shift=True AND price change is dominant difference",
+        "  → exploration:  specific novel concept (count>=2, NOT umbrella/platform) AND",
+        "                  NOT explainable by task_focus/budget_shift/simple rotation",
+        "  → unknown:      truly contradictory or < 3 distinct semantic concepts and",
+        "                  not clearly persona-consistent",
     ]
 
     if sparse_flag:
@@ -399,9 +435,9 @@ def _build_user_prompt(ctx: IntentContext, candidate_concepts: list[str], compac
             "⚠ SPARSE SEMANTIC SIGNAL WARNING ──────────────────────",
             f"  Raw top-1 concept is non-semantic ({raw_top1}) and semantic signal is weak.",
             f"  Do NOT assign task_focus based on raw dominance alone.",
-            f"  If semantic signal is too sparse and browsing appears persona-consistent,",
-            f"  prefer aligned (low confidence) over low-confidence exploration.",
-            f"  Only use unknown if signal is truly contradictory or absent.",
+            f"  Do NOT assign exploration unless a specific novel concept appears with count>=2.",
+            f"  Prefer aligned (low confidence) when what little signal exists overlaps persona.",
+            f"  Use unknown only if signal is truly contradictory — not merely sparse.",
         ]
 
     if not compact:
@@ -611,8 +647,38 @@ def interpret_with_llm(
         logger.warning("LLM interpretation failed for user=%s: %s", ctx.user_id, exc)
         result = _heuristic_fallback(ctx, prompt_candidates)
 
-    # Preserve Stage 1 output as raw_llm_goals (before Stage 2)
+    # Preserve Stage 1 output as raw_llm_goals (before Stage 2, before hygiene)
     result["raw_llm_goals"] = list(result.get("goal_concepts", []))
+
+    # ── Hygiene filter on raw_llm_goals ───────────────────────────────────────
+    # Remove price_band:*, format:*, and non-semantic category concepts from
+    # goal_concepts BEFORE Stage 2.  Diagnostics tracked for Task 2 fields.
+    _raw_before_hygiene = list(result["raw_llm_goals"])
+    _kept_raw, _removed_raw, _removal_reasons_raw = filter_non_semantic_goals(_raw_before_hygiene)
+    result["goal_concepts"]  = _kept_raw       # Stage 1 cleaned goals
+    result["raw_llm_goals"]  = _kept_raw       # raw_llm_goals = post-hygiene (pre-Stage2)
+    result["removed_non_semantic_goals"] = _removed_raw
+    # semantic_signal_absent: no semantic category evidence in recent window at all
+    # Use is_semantic_goal (not is_goal_eligible) to exclude price_band/format from count
+    _sem_total = sum(
+        cnt for cid, cnt in ctx.recent_concept_freq.items()
+        if is_semantic_goal(cid)
+    )
+    result["semantic_signal_absent"]    = (_sem_total == 0)
+    result["non_semantic_goal_leakage"] = len(_removed_raw) > 0
+    # goal_hygiene_status
+    if not _raw_before_hygiene:
+        result["goal_hygiene_status"] = "empty_raw_goals"
+    elif not _kept_raw and _removed_raw:
+        result["goal_hygiene_status"] = "only_non_semantic_raw"
+    elif not _kept_raw:
+        result["goal_hygiene_status"] = "empty_after_semantic_filter"
+    elif len(_kept_raw) == 1 and _kept_raw[0].startswith("category:") and \
+            _kept_raw[0] in {"category:drama", "category:comedy", "category:action",
+                             "category:movies_&_tv", "category:action_&_adventure"}:
+        result["goal_hygiene_status"] = "generic_only_remaining"
+    else:
+        result["goal_hygiene_status"] = "ok"
 
     # ── Code-injected provenance fields ───────────────────────────────────────
     # These are never generated by the LLM; populated here for parquet preservation.
@@ -639,7 +705,11 @@ def interpret_with_llm(
             persona_top_concepts=ctx.persona_top_concepts,
             ontology_concept_pool=None,   # passive; ontology not used for active scoring
         )
-        result["validated_goal_concepts"] = validated
+        # Hygiene filter on validated goals (Stage 2 may re-introduce non-semantic
+        # concepts from the bank; belt-and-suspenders cleanup)
+        _val_kept, _val_removed, _ = filter_non_semantic_goals(validated)
+        result["validated_goal_concepts"] = _val_kept
+        grounding_diag["hygiene_removed_validated"] = _val_removed
         result["grounding_diagnostics"]   = grounding_diag
         result["has_stage2"]              = True
     else:
@@ -653,7 +723,9 @@ def interpret_with_llm(
             getattr(ctx, "user_id", "?"),
             getattr(ctx, "target_index", "?"),
         )
-        result["validated_goal_concepts"] = list(result.get("goal_concepts", []))
+        _fb_goals = list(result.get("goal_concepts", []))
+        _fb_kept, _, _ = filter_non_semantic_goals(_fb_goals)
+        result["validated_goal_concepts"] = _fb_kept
         result["grounding_diagnostics"]   = {"skipped": True, "reason": "no_candidate_bank"}
         result["has_stage2"]              = False
 
@@ -706,8 +778,13 @@ def _heuristic_fallback(ctx: IntentContext, candidate_concepts: list[str]) -> di
         "evidence_persona_concepts": [],
         "raw_model_response_json":   None,
         "pre_grounding_goal_text":   list(goal_concepts),
-        "reason_source":             "llm_fallback",
-        "has_stage2":                False,
-        "llm_prompt_version":        LLM_PROMPT_VERSION,
-        "schema_version":            SCHEMA_VERSION,
+        "reason_source":                "llm_fallback",
+        "has_stage2":                   False,
+        "llm_prompt_version":           LLM_PROMPT_VERSION,
+        "schema_version":               SCHEMA_VERSION,
+        # hygiene fields — fallback goals are already from goal-eligible candidates
+        "removed_non_semantic_goals":   [],
+        "semantic_signal_absent":       False,
+        "non_semantic_goal_leakage":    False,
+        "goal_hygiene_status":          "fallback",
     }

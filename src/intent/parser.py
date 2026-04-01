@@ -191,6 +191,12 @@ def parse_intent(
     llm_prompt_version = _clean_str(raw.get("llm_prompt_version", ""), max_len=50)
     schema_version     = _clean_str(raw.get("schema_version", ""), max_len=20)
 
+    # ── v5: semantic goal hygiene fields ──────────────────────────────────────
+    removed_non_semantic_goals = _clean_str_list(raw.get("removed_non_semantic_goals"))
+    semantic_signal_absent     = bool(raw.get("semantic_signal_absent", False))
+    non_semantic_goal_leakage  = bool(raw.get("non_semantic_goal_leakage", False))
+    goal_hygiene_status        = _clean_str(raw.get("goal_hygiene_status", ""), max_len=50)
+
     return {
         "user_id": user_id,
         "target_index": target_index,
@@ -226,4 +232,9 @@ def parse_intent(
         "has_stage2": has_stage2,
         "llm_prompt_version": llm_prompt_version,
         "schema_version": schema_version,
+        # v5 semantic goal hygiene
+        "removed_non_semantic_goals": removed_non_semantic_goals,
+        "semantic_signal_absent": semantic_signal_absent,
+        "non_semantic_goal_leakage": non_semantic_goal_leakage,
+        "goal_hygiene_status": goal_hygiene_status,
     }

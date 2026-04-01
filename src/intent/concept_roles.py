@@ -793,3 +793,86 @@ def is_semantic_core(concept_id: str) -> bool:
 def is_noise_meta(concept_id: str) -> bool:
     """True if concept maps to NoiseMeta zone."""
     return get_ontology_zone(concept_id) == "NoiseMeta"
+
+
+# ── Semantic Goal Hygiene ──────────────────────────────────────────────────────
+# Hard-block non-semantic concepts from appearing in goal_concepts /
+# validated_goal_concepts slots.  This layer sits BELOW is_goal_eligible():
+# is_goal_eligible handles category: role hygiene; is_semantic_goal additionally
+# blocks format:* and price_band:* prefixes which bypass the role taxonomy.
+#
+# Design:
+#   - Prefix-level block:  format:*, price_band:*  always excluded from goal slot
+#   - Role-level block:    PLATFORM / UMBRELLA / NAVIGATION / PROMO_DEAL /
+#                          PUBLISHER / FORMAT_META / COLLECTION  (already in GOAL_EXCLUDED_ROLES)
+#   - Unknown category concepts default to STRONG_SEMANTIC (eligible) per existing policy
+#
+# Usage:
+#   is_semantic_goal(concept_id) -> bool
+#   filter_non_semantic_goals(goals) -> (kept, removed, reasons)
+
+_NON_SEMANTIC_PREFIXES: frozenset[str] = frozenset({
+    "price_band",
+    "format",
+})
+
+
+def is_semantic_goal(concept_id: str) -> bool:
+    """
+    Return True if concept_id is a valid semantic goal (allowed in goal_concepts slot).
+
+    Hard-blocks:
+      - price_band:* and format:* prefixes (technical/meta, not semantic intent)
+      - category: concepts with GOAL_EXCLUDED_ROLES (PLATFORM, UMBRELLA, NAV, etc.)
+
+    All other category: concepts (including unknown → STRONG_SEMANTIC) are allowed.
+    Non-category, non-price_band, non-format concepts are allowed (conservative).
+    """
+    prefix = concept_id.split(":")[0]
+    if prefix in _NON_SEMANTIC_PREFIXES:
+        return False
+    if prefix == "category":
+        return is_goal_eligible(concept_id)
+    return True  # other unknown prefixes: conservative allow
+
+
+def filter_non_semantic_goals(
+    goals: list[str],
+    extra_blocklist: "list[str] | None" = None,
+) -> "tuple[list[str], list[str], dict[str, str]]":
+    """
+    Filter a list of goal concept_ids, removing non-semantic concepts.
+
+    Args:
+        goals:          raw or validated goal concept_ids
+        extra_blocklist: optional additional concept_ids to always remove
+
+    Returns:
+        kept    — semantic goals that passed the filter
+        removed — concepts that were removed
+        reasons — {concept_id: reason_string} for diagnostics
+    """
+    blocklist: set[str] = set(extra_blocklist) if extra_blocklist else set()
+    kept: list[str] = []
+    removed: list[str] = []
+    reasons: dict[str, str] = {}
+
+    for cid in goals:
+        if cid in blocklist:
+            removed.append(cid)
+            reasons[cid] = "extra_blocklist"
+            continue
+        prefix = cid.split(":")[0]
+        if prefix in _NON_SEMANTIC_PREFIXES:
+            removed.append(cid)
+            reasons[cid] = f"non_semantic_prefix:{prefix}"
+            continue
+        if prefix == "category":
+            role = get_role(cid)
+            if role in GOAL_EXCLUDED_ROLES:
+                removed.append(cid)
+                reasons[cid] = f"excluded_role:{role}"
+                continue
+        kept.append(cid)
+
+    return kept, removed, reasons

@@ -346,7 +346,13 @@ def build_signal(
         graph_conditioned_full — both sources, reason-conditioned combination
         (backbone_only / others) — empty signal, handled upstream
     """
-    reason = intent_record.get("deviation_reason", "unknown")
+    # Priority: routed_reason (unknown_router) > recalibrated_reason (exploration_recalibrator)
+    # > deviation_reason (original LLM output). Each layer is backward-compatible.
+    reason = (
+        intent_record.get("routed_reason")
+        or intent_record.get("recalibrated_reason")
+        or intent_record.get("deviation_reason", "unknown")
+    )
 
     # Stage 3: prefer validated_goal_concepts (Stage 2 output) over raw goal_concepts.
     # validated_goal_concepts is set by grounded_selector and is grounded to the
@@ -550,7 +556,9 @@ def build_signal(
     # ── reason-conditioned persona blend ─────────────────────────────
     suppress_concepts: list[str] = []
 
-    if reason == "aligned":
+    if reason in ("aligned", "aligned_soft"):
+        # aligned_soft: treat like aligned — persona prior dominates,
+        # recent intent is a mild same-taste flavor (no contrastive boost)
         existing = set(boost_concepts)
         if aligned_finer_top_n > 0:
             finer = _finer_persona_concepts(
@@ -566,17 +574,16 @@ def build_signal(
             boost_concepts = boost_concepts + persona_extra
             persona_contributed.extend(persona_extra)
 
-    elif reason == "exploration":
-        if exploration_finer_top_n > 0:
-            existing = set(boost_concepts)
-            finer = _finer_persona_concepts(
-                persona_top_ids, existing, exclude_types, _ALWAYS_EXCLUDE,
-                _FINE_TYPES, exploration_finer_top_n,
-            )
-            boost_concepts = boost_concepts + finer
-            persona_contributed.extend(finer)
+    elif reason in ("task_focus", "task_focus_like"):
+        # task_focus_like: narrow boost, TTL short, persona override suppressed
+        goal_set = set(boost_concepts)
+        suppress_concepts = [
+            c for c in persona_top_ids
+            if c not in goal_set and not c.startswith("category:")
+        ][:3]
 
-    elif reason == "budget_shift":
+    elif reason in ("budget_shift", "budget_like"):
+        # budget_like: price/format modulation; suppress conflicting price_band
         recent_price = next(
             (c for c in goal_concepts
              if c.startswith("price_band:") and c != "price_band:unknown"), None,
@@ -586,14 +593,32 @@ def build_signal(
             if c.startswith("price_band:") and c != "price_band:unknown" and c != recent_price
         ]
 
-    elif reason == "task_focus":
-        goal_set = set(boost_concepts)
-        suppress_concepts = [
-            c for c in persona_top_ids
-            if c not in goal_set and not c.startswith("category:")
-        ][:3]
+    elif reason == "exploration":
+        # legacy exploration (no recalibration applied): keep existing behavior
+        if exploration_finer_top_n > 0:
+            existing = set(boost_concepts)
+            finer = _finer_persona_concepts(
+                persona_top_ids, existing, exclude_types, _ALWAYS_EXCLUDE,
+                _FINE_TYPES, exploration_finer_top_n,
+            )
+            boost_concepts = boost_concepts + finer
+            persona_contributed.extend(finer)
 
-    elif reason == "unknown":
+    elif reason == "true_exploration":
+        # true_exploration: contrastive recent concepts allowed.
+        # Moderate trust — persona not fully overridden.
+        # Finer persona concepts added to preserve some persona anchor.
+        if exploration_finer_top_n > 0:
+            existing = set(boost_concepts)
+            finer = _finer_persona_concepts(
+                persona_top_ids, existing, exclude_types, _ALWAYS_EXCLUDE,
+                _FINE_TYPES, exploration_finer_top_n,
+            )
+            boost_concepts = boost_concepts + finer
+            persona_contributed.extend(finer)
+
+    elif reason in ("exploration_unclear", "unknown"):
+        # exploration_unclear: conservative — near-aligned handling
         if unknown_persona_top_n > 0:
             existing = set(boost_concepts)
             persona_extra = _filter_excluded(persona_top_ids, exclude_types, _ALWAYS_EXCLUDE)
