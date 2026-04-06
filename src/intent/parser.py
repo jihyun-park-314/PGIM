@@ -16,7 +16,10 @@ Output schema (one row in short_term_intents.parquet):
     llm_explanation_short, why_not_aligned, why_exploration,
     llm_raw, evidence_recent_concepts, evidence_persona_concepts,
     raw_model_response_json, pre_grounding_goal_text,
-    reason_source, has_stage2, llm_prompt_version, schema_version
+    reason_source, has_stage2, llm_prompt_version, schema_version,
+    -- PR3-1 structured interpretation fields --
+    context_goals, contrast_with_persona, temporal_cues,
+    evidence_sources, support_items, token_usage
 """
 
 from __future__ import annotations
@@ -197,6 +200,27 @@ def parse_intent(
     non_semantic_goal_leakage  = bool(raw.get("non_semantic_goal_leakage", False))
     goal_hygiene_status        = _clean_str(raw.get("goal_hygiene_status", ""), max_len=50)
 
+    # ── PR3-1: structured interpretation fields ───────────────────────────────
+    # Forwarded directly from llm_interpreter output.
+    # contrast_with_persona / temporal_cues: stored as JSON string to avoid
+    # nested-dict parquet serialization issues.
+    def _dumps_safe(val: Any) -> str:
+        if val is None:
+            return "{}"
+        if isinstance(val, str):
+            return val  # already serialized
+        try:
+            return json.dumps(val, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+    context_goals = _clean_str_list(raw.get("context_goals"))
+    contrast_with_persona = _dumps_safe(raw.get("contrast_with_persona"))
+    temporal_cues         = _dumps_safe(raw.get("temporal_cues"))
+    evidence_sources      = _clean_str_list(raw.get("evidence_sources"))
+    support_items         = _clean_str_list(raw.get("support_items"))
+    token_usage           = _dumps_safe(raw.get("token_usage"))
+
     return {
         "user_id": user_id,
         "target_index": target_index,
@@ -237,4 +261,11 @@ def parse_intent(
         "semantic_signal_absent": semantic_signal_absent,
         "non_semantic_goal_leakage": non_semantic_goal_leakage,
         "goal_hygiene_status": goal_hygiene_status,
+        # PR3-1 structured interpretation fields
+        "context_goals": context_goals,
+        "contrast_with_persona": contrast_with_persona,
+        "temporal_cues": temporal_cues,
+        "evidence_sources": evidence_sources,
+        "support_items": support_items,
+        "token_usage": token_usage,
     }

@@ -31,6 +31,7 @@ from typing import Optional
 import pandas as pd
 
 from src.intent.concept_roles import get_ontology_zone
+from src.common.schema import AUDIT_ONLY_FIELDS, SCORING_FORBIDDEN_FIELDS, VERIFIED_SCORING_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +347,42 @@ def build_signal(
         graph_conditioned_full — both sources, reason-conditioned combination
         (backbone_only / others) — empty signal, handled upstream
     """
+    # ── Scoring-forbidden guard ───────────────────────────────────────────────
+    # SCORING_FORBIDDEN_FIELDS = AUDIT_ONLY_FIELDS | LLM_UNVERIFIED_FIELDS.
+    # Log any forbidden fields present so we can verify none are consumed below.
+    # Delta computation must ONLY read from VERIFIED_SCORING_FIELDS.
+    _forbidden_present = set(intent_record.keys()) & SCORING_FORBIDDEN_FIELDS
+    if _forbidden_present:
+        logger.debug(
+            "signal_builder: scoring-forbidden fields in record (audit/unverified — not used for scoring): %s",
+            sorted(_forbidden_present),
+        )
+
+    # ── v3/PR3-1: verified channel binding ───────────────────────────────────
+    # Explicitly bind from the verified scoring channel only.
+    # contrast_with_persona: grounded entries have int values; "llm" entries are
+    #   LLM-unverified and are NOT used for delta computation.
+    # temporal_cues: code-authoritative keys used; "llm_shift_summary" key ignored.
+    # These are passed to debug_info for observability; scoring use deferred to
+    # delta_context / delta_deviation in the next PR.
+    _contrast_with_persona: dict = intent_record.get("contrast_with_persona", {})
+    _temporal_cues: dict         = intent_record.get("temporal_cues", {})
+    _evidence_sources: list      = intent_record.get("evidence_sources", [])
+    # Verified contrast = int-valued entries only (backbone-grounded)
+    _verified_contrast: dict[str, int] = {
+        c: v for c, v in _contrast_with_persona.items() if isinstance(v, int)
+    }
+    # LLM-only contrast = "llm"-valued entries (unverified; debug only)
+    _llm_contrast: list[str] = [
+        c for c, v in _contrast_with_persona.items() if v == "llm"
+    ]
+    # Verified temporal = exclude llm_shift_summary (audit phrase)
+    _verified_temporal: dict = {
+        k: v for k, v in _temporal_cues.items() if k != "llm_shift_summary"
+    }
+    # Token usage — observability only; not a scoring signal
+    _token_usage: dict = intent_record.get("token_usage", {})
+
     # Priority: routed_reason (unknown_router) > recalibrated_reason (exploration_recalibrator)
     # > deviation_reason (original LLM output). Each layer is backward-compatible.
     reason = (
@@ -496,6 +533,12 @@ def build_signal(
             "validated_goal_concepts": goal_concepts,  # Stage 2 output (entered modulation)
             "excluded": [c for c in goal_concepts if c not in boost_concepts],
             "boost": boost_concepts,
+            # PR3-1: verified channel pass-through
+            "verified_contrast": _verified_contrast,
+            "verified_temporal": _verified_temporal,
+            "evidence_sources": _evidence_sources,
+            "llm_contrast": _llm_contrast,
+            "token_usage": _token_usage,
         }
         return ModulationSignal(
             user_id=intent_record["user_id"],
@@ -664,6 +707,19 @@ def build_signal(
              "intent": concept_signals[c].intent_score}
             for c in boost_concepts[:5] if c in concept_signals
         ] if use_v2 else [],
+        # ── PR3-1: verified vs unverified channel pass-through ────────────────
+        # Structured interpretation fields — not yet wired into delta computation.
+        # Future PR (delta_context + delta_deviation) will consume verified_contrast
+        # and verified_temporal as scoring inputs.
+        #
+        # VERIFIED (backbone-grounded or code-authoritative):
+        "verified_contrast": _verified_contrast,          # {concept_id: bank_activation}
+        "verified_temporal": _verified_temporal,          # {shift_detected, dominant, freq}
+        "evidence_sources": _evidence_sources,
+        # LLM-UNVERIFIED (not grounded; debug/observability only):
+        "llm_contrast": _llm_contrast,                    # [concept_id, ...]
+        "llm_shift_summary": _temporal_cues.get("llm_shift_summary", ""),
+        "token_usage": _token_usage,
     }
 
     return ModulationSignal(

@@ -327,6 +327,10 @@ def validate_and_select_goals(
     # ── Step 3: Persona conflict suppression (config-gated) ───────────────
     pc_cfg = cfg["persona_conflict"]
     after_persona = after_activation
+    # structured upward-pass: which concepts were suppressed because they matched
+    # the persona top-N, and their candidate bank activation counts.
+    # Consumed by llm_interpreter to populate contrast_with_persona.
+    _suppressed_by_persona: list[str] = []
 
     if pc_cfg["enabled"] and deviation_reason in pc_cfg.get("reasons", ["exploration"]):
         top_n = int(pc_cfg["top_n"])
@@ -339,6 +343,7 @@ def validate_and_select_goals(
                 f"persona_conflict_suppression(top_{top_n}, reason={deviation_reason}): "
                 f"suppressed {suppressed}"
             )
+            _suppressed_by_persona = suppressed
 
         if not survivors and pc_cfg.get("fallback_keep_top1", True):
             # Keep highest-activation concept even if it's in persona top-N
@@ -349,6 +354,15 @@ def validate_and_select_goals(
                 f"(all {len(suppressed)} suppressed, fallback_keep_top1=True)"
             )
         after_persona = survivors
+
+    # Structured upward-pass fields (consumed by llm_interpreter, not by scoring logic).
+    # suppressed_by_persona: concepts dropped because they matched the persona top-N.
+    # contrast_signal:       their candidate bank activation counts (proxy for how
+    #                        "present" they are in the current candidate space).
+    diag["suppressed_by_persona"] = _suppressed_by_persona
+    diag["contrast_signal"] = {
+        c: candidate_concept_bank.get(c, 0) for c in _suppressed_by_persona
+    }
 
     if not after_persona:
         diag["steps"].append("all_dropped_by_persona_conflict (no fallback)")

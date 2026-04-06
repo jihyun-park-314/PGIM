@@ -1,46 +1,34 @@
 """
 llm_interpreter.py
 ------------------
-LLM-based short-term intent interpreter for PGIM.
+LLM-based recent-context interpreter for PGIM.
 
-3-stage architecture:
-  Stage 1 — Short-term interpretation (THIS FILE, interpret_with_llm):
-             input:  recent window + compact persona summary
-             output: deviation_reason, confidence, raw_llm_goal_concepts
-             LLM focuses on semantic interpretation only.
+Role: interpret what a user's recent watch/browse activity means relative to their
+long-term persona.  NOT a next-item predictor.  NOT a simple intent classifier.
 
-  Stage 2 — Grounded goal selection / validation (grounded_selector.py):
-             input:  Stage 1 hypothesis + candidate_concept_bank + persona prior
-             output: validated_goal_concepts
-             Free generation forbidden; closed concept space from backbone candidates.
+3-stage pipeline:
+  Stage 1 — Recent context interpretation (THIS FILE):
+             input:  IntentContext (recent window + persona summary + temporal split)
+             output: structured interpretation record with 2 channels —
+               SCORING: goal_concepts, context_goals, deviation_reason, confidence,
+                        contrast_with_persona, temporal_cues, evidence_sources
+               AUDIT:   llm_explanation_short, why_not_aligned, why_exploration
+
+  Stage 2 — Grounded goal validation (grounded_selector.py):
+             input:  Stage 1 goal_concepts + backbone candidate_concept_bank
+             output: validated_goal_concepts (closed concept space; leakage-guarded)
 
   Stage 3 — Modulation (signal_builder.py):
-             only validated_goal_concepts enter the signal builder.
-             raw_llm_goal_concepts preserved for diagnostics/ablation only.
+             only validated_goal_concepts / context_goals enter delta computation.
+             AUDIT_ONLY_FIELDS are never read by signal_builder.
 
-Interface:
-    interpret_with_llm(ctx, persona_summary, intent_cfg, openai_client,
-                       candidate_concept_bank=None) -> raw dict
+Key invariants:
+- No open generation: goal_concepts drawn from candidate pool only
+- deviation_reason = expansion policy signal (controls modulation strength, not on/off)
+- Structured output via JSON mode
+- Heuristic fallback on LLM failure
 
-Output schema is backward-compatible with parser.parse_intent().
-New fields:
-    raw_llm_goals:         original LLM goal_concepts (before Stage 2 validation)
-    validated_goal_concepts: Stage 2 output (grounded to candidate bank)
-    grounding_diagnostics: per-field Stage 2 audit trail
-
-If candidate_concept_bank is None, Stage 2 is skipped and validated_goal_concepts
-falls back to goal_concepts (backward-compat mode).
-
-Design constraints:
-- No open generation: goal_concepts must be drawn from a provided candidate set
-- deviation_reason restricted to the 5-value taxonomy
-- Structured output via JSON mode (response_format={"type": "json_object"})
-- Heuristic fallback on any failure
-
-Version: B (grounded selector integrated)
-- Stage 1: semantic-primary context (goal-eligible concepts as PRIMARY signal)
-- Stage 2: candidate_concept_bank activation gate + persona conflict suppression
-- raw_llm_goals preserved for ablation comparison
+Version: v6 (recent_context_interpreter frame, PR2/PR2.5)
 """
 
 from __future__ import annotations
@@ -52,6 +40,7 @@ from typing import Any, Optional
 from src.intent.context_extractor import IntentContext
 from src.intent.concept_roles import is_goal_eligible, is_semantic_goal, filter_non_semantic_goals
 from src.intent.grounded_selector import validate_and_select_goals
+from src.common.schema import AUDIT_ONLY_FIELDS  # noqa: F401 — imported for contract documentation
 
 logger = logging.getLogger(__name__)
 
@@ -59,252 +48,127 @@ logger = logging.getLogger(__name__)
 VALID_REASONS = {"aligned", "exploration", "task_focus", "budget_shift", "unknown"}
 
 # ── Versioning — bump when prompt schema or injected fields change ─────────────
-LLM_PROMPT_VERSION = "v5_semantic_goal_hygiene"  # v5: strict semantic-only goal slot + v4 reason calibration
-SCHEMA_VERSION     = "3.0"                       # parquet schema version for downstream compat checks
+LLM_PROMPT_VERSION = "v6_recent_context_interpreter"  # v6: frame shift to "interpret recent behavior" + temporal flow + structured output
+SCHEMA_VERSION     = "3.1"                            # bumped: contrast_with_persona / temporal_cues / evidence_sources in LLM schema
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 _SYSTEM_PROMPT = """\
-You are a short-term intent classifier for an Amazon Movies & TV recommendation system.
+You are a recent-behavior interpreter for an Amazon Movies & TV recommendation system.
 
-Your task: given a user's recent watch/browse history and their long-term persona, identify
-what the user is specifically interested in RIGHT NOW, and how it differs from their usual taste.
+Interpret what a user's recent watch/browse activity means relative to their long-term
+persona.  Read the temporal sequence in the user prompt and produce a structured record.
 
-════════════════════════════════════════════════════════════
-OUTPUT RULES (strictly enforced)
-════════════════════════════════════════════════════════════
-1. goal_concepts: select 1–4 items from candidate_concepts ONLY. Do not invent IDs.
-   - Prefer SEMANTIC genre/subgenre/theme/mood concepts (e.g. category:action, category:drama)
-   - NEVER put price_band:* or format:* in goal_concepts — these go into constraints only
-   - NEVER put platform/container concepts in goal_concepts:
-     price_band:unknown, price_band:low, price_band:high → constraints only
-     format:dvd, format:blu-ray → constraints only
-     category:prime_video, category:movies_&_tv, category:featured_categories → FORBIDDEN in goal slot
-   - If semantic signal is absent, return goal_concepts: [] (empty list is valid)
-   - If a more specific subcategory exists, prefer it over a broad category
-2. constraints: dict with keys "price_band" and/or "format" if clearly present; else {}
-   - price/format information MUST go here, not into goal_concepts
-3. deviation_reason: exactly one of the 5 values below
-4. confidence: be conservative — reserve 0.85+ for very clear cases only
-5. Return ONLY valid JSON, no markdown, no free text outside JSON values
-6. llm_explanation_short: max 2 sentences; phrase-level evidence only (no chain-of-thought)
-7. why_not_aligned / why_exploration: fill only when semantically applicable; use "" otherwise
+Two output channels — keep them strictly separate:
+  SCORING  — structured fields used downstream to adjust recommendations.
+             All concept IDs must come from candidate_concepts ONLY.
+  AUDIT    — natural-language rationale for human review; never used for scoring.
 
 ════════════════════════════════════════════════════════════
-DEVIATION REASON DECISION RULES
+OUTPUT RULES
 ════════════════════════════════════════════════════════════
+goal_concepts      Select 1–4 from candidate_concepts. Semantic genre/theme only.
+                   FORBIDDEN: price_band:*, format:*, category:prime_video,
+                   category:movies_&_tv, category:featured_categories, any UMBRELLA/
+                   PLATFORM/NAVIGATION/PROMO_DEAL/PUBLISHER/FORMAT_META concept.
+                   Return [] if no semantic signal.
 
-Step 1 — Check budget_shift FIRST:
-  → budget_shift IF recent_dominant_price_band is present AND clearly differs from
-    persona_dominant_price_band (e.g. recent=price_band:low vs persona=price_band:high)
-  → Do NOT use budget_shift for minor differences or when price_band is absent
+constraints        {"price_band": [...], "format": [...]} or {}
 
-Step 2 — Check task_focus SECOND (before aligned/exploration):
-  → task_focus means: the user has a narrow, distinctly focused short-term objective —
-    they are purposefully drilling into a specific sub-genre, subcategory, or content cluster
-    that is MORE SPECIFIC than their usual persona-level preference.
-  → task_focus requires BOTH of the following:
-      (A) CONCENTRATION: semantic_top_dominance >= 0.45 AND the top 1–2 semantic concepts
-          account for most of the semantic recent activity.
-      (B) SPECIFICITY: the concentrated concept(s) represent a more specific direction
-          than what the persona broadly covers. Ask: "Is this a narrowing-down beyond
-          the persona's usual range, or just normal repeated consumption of what they
-          always watch?"
-          - If the top concept IS already one of persona's top-3 concepts AND no
-            more-specific subcategory is present in recent, this is likely aligned,
-            not task_focus.
-          - If the top concept is a subcategory or genre the persona shows only
-            weakly (not in persona top-3), this signals a purposeful drill.
-  → KEY EXAMPLES OF WHAT IS NOT task_focus:
-      - User's persona top concept is category:drama; recent is also mostly category:drama
-        → This is aligned (normal consumption), not task_focus.
-      - User always watches action; recent has category:action(6), category:movies_&_tv(3)
-        → aligned if action is already the persona's dominant concept.
-      - Recent is mostly category:prime_video(10) with a few sparse content concepts
-        → NOT task_focus. prime_video is a platform anchor, not a content genre drill.
-        → If semantic drift concepts exist (outside persona), use exploration instead.
-  → KEY EXAMPLES OF WHAT IS task_focus:
-      - Persona is broad (drama/action/comedy); recent is almost entirely category:horror
-        → task_focus (horror is a narrowing beyond the persona's usual range).
-      - Persona is drama/comedy; recent heavily clusters on category:anime + category:animation
-        → task_focus (anime cluster is a distinct short-term objective).
-  → goal_concepts for task_focus: pick the 1–2 dominant semantic concepts from recent.
+deviation_reason   EXPANSION POLICY — controls modulation strength, not on/off.
+                   Decide in this order:
+                   1. budget_shift  — price band clearly shifted vs persona; else skip.
+                   2. task_focus    — sem_top_dom >= 0.45 AND top concept is MORE SPECIFIC
+                                      than persona top-3 (a narrowing, not normal consumption).
+                                      If top concept IS already persona top-3 → aligned.
+                   3. aligned       — DEFAULT when uncertain. Use when overlap >= 0.40 OR
+                                      drift is only broad/generic OR signal is sparse.
+                   4. exploration   — ALL must be true: (A) specific novel concept NOT in
+                                      persona top-10, (B) count >= 2 for that concept,
+                                      (C) not explainable by task_focus/budget_shift,
+                                      (D) not just UMBRELLA/PLATFORM drift.
+                   5. unknown       — contradictory signals or < 3 semantic concepts AND
+                                      not clearly persona-consistent.
 
-Step 3 — Distinguish aligned vs exploration:
-  → DEFAULT RULE: when in doubt between aligned and exploration, choose aligned.
-    Exploration requires POSITIVE evidence of genuine semantic drift — not merely
-    low overlap or a few unfamiliar concepts.
+confidence         Conservative: 0.85+ for very clear cases only.
+                   aligned high conf (>0.80) requires overlap >= 0.60.
+                   task_focus borderline → 0.50–0.65.
 
-  → aligned when ANY of the following:
-      (a) semantic_overlap_ratio >= 0.40 AND no repeated drift concepts outside persona
-          (recent is substantially within the persona's known territory)
-      (b) recent top concepts are broad/generic (drama, comedy, action, movies_&_tv)
-          and the persona covers those same broad categories — broad category overlap
-          is NOT exploration even at low counts
-      (c) only format/price/platform differences exist but semantic categories are
-          persona-consistent — format or price change alone is NOT exploration
-      (d) semantic signal is sparse (≤ 3 distinct semantic concepts) AND what little
-          signal exists overlaps persona — default to aligned, not exploration
+contrast_signal_concepts
+                   Persona concepts NOT seen (or clearly reduced) in recent window.
+                   Identifies what the user is moving away from.
+                   [] if recent is mostly aligned with persona.
 
-  → exploration ONLY when ALL of the following are true:
-      (A) SEMANTIC NOVELTY: recent contains specific genre/theme concepts that are
-          NOT in persona top-10 (not just "different broad category" but genuinely
-          unfamiliar territory for this user)
-      (B) REPEATED SIGNAL: the novel concept(s) appear with count >= 2, OR multiple
-          distinct novel concepts appear (not just a single count=1 outlier)
-      (C) NOT EXPLAINABLE by task_focus or budget_shift:
-          - if concentration is high (dom >= 0.45) → use task_focus instead
-          - if price_band_shift is the dominant difference → use budget_shift instead
-      (D) NOT just generic container drift:
-          - drift concepts are NOT umbrella/platform/navigation/format_meta/promo
-          - "user watched drama this week instead of action" is aligned, not exploration
-          - broad-to-broad shift (drama ↔ comedy ↔ action) is aligned unless
-            a genuinely specific non-persona concept (e.g. category:western,
-            category:anime) appears with count >= 2
+temporal_shift_summary
+                   ≤ 12 words: dominant concept shift between first/second half.
+                   Use the TEMPORAL FLOW section.  "" if no clear shift.
 
-  → Do NOT use exploration for:
-      - Concept count=1 outliers in an otherwise persona-consistent window
-      - Users whose recent is dominated by platform anchors (prime_video, dvd, blu-ray)
-        with only sparse semantic signal → prefer aligned or unknown
-      - Simple rotation within known broad categories the persona already covers
-      - Cases where the only "new" concepts are generic/umbrella ones
+evidence_sources   Include whichever apply:
+                     "recent_freq"      — concept frequency was the main signal
+                     "temporal_shift"   — first/second half shift detected
+                     "persona_contrast" — recent contrasts with persona top concepts
 
-  → Do NOT classify as exploration when semantic_top_dominance >= 0.45 AND the
-    concentrated concept is outside the persona — use task_focus instead.
+ttl_steps          1–5; shorter for unknown/budget_shift, longer for exploration/task_focus.
 
 ════════════════════════════════════════════════════════════
-EXPLORATION GOAL_CONCEPT SELECTION RULE (required when deviation_reason=exploration)
+EXPLORATION goal_concepts RULE
 ════════════════════════════════════════════════════════════
-goal_concepts for exploration must represent the NEW or ADJACENT directions
-emerging in recent behavior — NOT the user's usual persona preferences.
-
-Selection steps:
-  1. Look at "Semantic drift NOT in persona top-5" in the user prompt (concepts in recent
-     but NOT in persona top-5). These are your primary candidates.
-  2. Among those, pick 1–3 concepts sorted by recent semantic freq (highest first).
-  3. Prefer more specific category/subcategory concepts over broad umbrella concepts.
-
-FORBIDDEN as exploration goal_concepts:
-  ✗ any concept that is already in persona top-5  (that is the persona direction, not exploration)
-  ✗ UMBRELLA concepts: category:movies_&_tv, category:movies, category:tv, category:television
-  ✗ PLATFORM concepts: category:prime_video
-  ✗ NAVIGATION concepts: category:featured_categories, category:genre_for_featured_categories,
-      category:all_titles, category:all, category:general, category:more_to_explore
-  ✗ PROMO_DEAL concepts: category:studio_specials, category:today's_deals,
-      category:featured_deals_&_new_releases, category:the_big_dvd_&_blu-ray_blowout,
-      category:spotlight_deals, and any publisher deal label
-  ✗ PUBLISHER concepts: category:warner_home_video, category:sony_pictures_home_entertainment,
-      category:all_sony_pictures_titles, category:all_mgm_titles, category:all_fox_titles,
-      category:independently_distributed, and any other studio/distributor label
-  ✗ FORMAT_META concepts: category:blu-ray, category:dvd, category:widescreen, category:dts
-
-  NOTE: The candidate_concepts list shown in this prompt has already been pre-filtered
-  to remove most non-semantic concepts. Use concepts from that filtered list.
-
-If recent-only semantic concepts are sparse (all count=1, few options):
-  → pick the 1–2 highest-frequency ones; do NOT pick every single count=1 concept
-    (that creates a too-diffuse goal with no real direction signal)
-  → if all eligible concepts have count=1 and there are 3+, just pick the top 2
-
-If recent-only semantic concepts are sparse AND platform/umbrella dominates:
-  → look carefully at what little semantic signal exists
-  → if no meaningful semantic drift exists outside persona, prefer aligned or unknown
-    over a low-confidence exploration guess
-
-Step 4 — Use unknown when:
-  → Signals are contradictory or insufficient to classify with reasonable confidence
-  → recent_concept_freq has very few semantic entries (< 3 distinct semantic concepts)
-    AND browsing is not clearly persona-consistent
+Pick from "Semantic drift NOT in persona top-5" in the user prompt.
+Sort by freq; prefer specific over broad; max 3.
+If all drift concepts are count=1 and there are 3+, pick only top 2.
+FORBIDDEN (same list as goal_concepts above, plus any concept in persona top-5).
 
 ════════════════════════════════════════════════════════════
 EXAMPLES
 ════════════════════════════════════════════════════════════
-EXAMPLE A — task_focus:
-  persona: drama, action, comedy | recent: horror(8), movies_&_tv(3) | dom=0.67 overlap=0.40
-  → task_focus; goal=[category:horror]
+A — task_focus: persona=drama/action/comedy | flow: drama(3)→horror(5) | dom=0.67 overlap=0.40
+    goal=[category:horror] contrast=[category:drama,category:action]
+    temporal_shift_summary="drama→horror shift in second half"
 
-EXAMPLE B — task_focus:
-  persona: drama, comedy | recent: anime(5), animation(4), movies_&_tv(2) | dom=0.45 overlap=0.50
-  → task_focus; goal=[category:anime, category:animation]
+B — aligned: persona=drama/action/thriller | flow: drama(2),action(2)→drama(2),thriller(2) | overlap=0.75
+    goal=[category:drama,category:action] contrast=[]
+    temporal_shift_summary="drama/action consistent across both halves"
 
-EXAMPLE C — exploration (wide drift):
-  persona: drama, action, comedy, movies_&_tv, thriller | recent: documentary(2), sci-fi(2), romance(2), western(1)
-  drift=[documentary, sci-fi, romance, western] dom=0.25 overlap=0.20
-  → exploration; goal=[category:documentary, category:sci-fi]  ← NOT movies_&_tv (persona anchor)
-
-EXAMPLE D — aligned:
-  persona: drama, action, thriller | recent: drama(4), action(3), thriller(2) | dom=0.44 overlap=0.75
-  → aligned
-
-EXAMPLE E — unknown (platform-dominant + only count=1 drift):
-  persona: drama, action, comedy, thriller, mystery | recent: prime_video(10), suspense(1), western(1)
-  dom=0.71 (platform, NOT content) overlap=0.20
-  → unknown; conf=0.35
-  NOTE: suspense(1) and western(1) are single-occurrence outliers — NOT repeated signal.
-        Do NOT call this exploration. Platform dominance + count=1 drift = insufficient evidence.
-        Use unknown (weak signal) rather than forcing a low-confidence exploration guess.
-
-EXAMPLE F — exploration (genuine specific drift with repeated signal):
-  persona: drama, action, comedy | recent: anime(3), animation(2), sci-fi(1) | dom=0.38 overlap=0.10
-  drift=[anime, comedy(1)] specific novel: anime(3) animation(2), both count>=2, NOT in persona top-10
-  → exploration; goal=[category:anime, category:animation]; conf=0.65
-  NOTE: anime and animation appear with count>=2, are specific (non-umbrella), outside persona top-10.
+C — exploration: persona=drama/action/comedy | flow: drama(2)→anime(3),animation(2) | dom=0.38 overlap=0.10
+    goal=[category:anime,category:animation] contrast=[category:drama,category:action]
+    temporal_shift_summary="drama→anime/animation shift in second half"
 
 ════════════════════════════════════════════════════════════
-CONFIDENCE CALIBRATION
-════════════════════════════════════════════════════════════
-- 0.85–1.0 : very clear signal, strong evidence
-- 0.65–0.84: reasonably clear, minor ambiguity
-- 0.45–0.64: moderate confidence, some mixed signals
-- 0.20–0.44: weak signal, lean toward unknown instead
-- Never give high confidence (>0.80) to aligned unless semantic_overlap >= 0.60
-- task_focus with mixed signals (e.g. semantic_top_dominance 0.45–0.55, borderline specificity): use 0.50–0.65
-- When distinction between aligned and task_focus is borderline, use moderate confidence (0.55–0.65)
-
-════════════════════════════════════════════════════════════
-OUTPUT SCHEMA (all fields required)
+OUTPUT SCHEMA (all fields required, valid JSON only)
 ════════════════════════════════════════════════════════════
 {
-  "goal_concepts": ["concept_id_1", ...],
-  "constraints": {"price_band": [...], "format": [...]},
+  "goal_concepts": [],
+  "constraints": {},
   "deviation_reason": "aligned|exploration|task_focus|budget_shift|unknown",
   "confidence": 0.0,
   "ttl_steps": 1,
   "persona_alignment_score": 0.0,
   "evidence_item_ids": [],
-
-  "llm_explanation_short": "One or two sentences summarizing why you assigned this deviation_reason.",
-  "why_not_aligned": "One sentence on why the recent behavior does NOT match the persona (omit / use \"\" when deviation_reason=aligned).",
-  "why_exploration": "One sentence on what makes recent behavior exploratory rather than concentrated task_focus (required only when deviation_reason=exploration; use \"\" otherwise)."
+  "contrast_signal_concepts": [],
+  "temporal_shift_summary": "",
+  "evidence_sources": [],
+  "llm_explanation_short": "≤2 sentences; phrase-level evidence only.",
+  "why_not_aligned": "Fill when deviation_reason != aligned; else \"\".",
+  "why_exploration": "Fill when deviation_reason == exploration; else \"\"."
 }
-
-════════════════════════════════════════════════════════════
-RATIONALE SLOT RULES
-════════════════════════════════════════════════════════════
-llm_explanation_short   — ALWAYS fill; max 2 sentences; describe what pattern drove the label.
-why_not_aligned         — Fill only when deviation_reason != "aligned"; leave "" when aligned.
-why_exploration         — Fill only when deviation_reason == "exploration"; leave "" otherwise.
-
-Keep all three slots SHORT (phrase-level evidence, not chain-of-thought).
-BAD:  "The user has been watching drama and comedy films for a long time according to their persona,
-       but recently their viewing history includes some elements of science fiction..."
-GOOD: "Recent window mixes sci-fi and documentary with low overlap (0.22) to persona top concepts."
 """
 
 # ── Per-call user prompt ───────────────────────────────────────────────────────
 
 def _build_user_prompt(ctx: IntentContext, candidate_concepts: list[str], compact: bool = False) -> str:
     """
-    Build a grounded, diagnostics-rich user prompt for Movies & TV intent classification.
+    Build a grounded, diagnostics-rich user prompt for recent-behavior interpretation.
 
-    Version A (mainline stable):
+    Version B (v6 — recent context interpreter frame):
     - Semantic-only concepts (goal-eligible) as PRIMARY classification signal
-    - Raw concept signal shown as AUXILIARY only (do not classify from this)
-    - Goal candidates filtered by is_goal_eligible (no PLATFORM/UMBRELLA/NAV/PROMO/PUBLISHER/FORMAT)
+    - Temporal flow section added: ordered first-half / second-half concept breakdown
+    - Goal candidates filtered by is_goal_eligible
+    - Instruction at bottom changed: "interpret" not "classify"
 
-    compact=True: cost-reduced mode for 4o pilot runs.
-    - Omits AUXILIARY raw freq section (~100 tokens saved)
-    - Caps category candidates at 20 instead of 30 (~30 tokens saved)
+    compact=True: cost-reduced mode.
+    - Omits AUXILIARY raw freq section
+    - Caps category candidates at 20 instead of 30
     - Omits recent_item_ids line
+    - Omits temporal flow detail (only summary line kept)
     All decision signals (semantic freq, drift, overlap, dominance) are fully preserved.
     """
     # ── Persona sets ──────────────────────────────────────────────────────────
@@ -376,6 +240,53 @@ def _build_user_prompt(ctx: IntentContext, candidate_concepts: list[str], compac
     sem_is_sparse = total_sem <= 3 or (sem_n_dist <= 2 and max(sem_freq.values(), default=0) <= 1)
     sparse_flag = raw_top1_is_nonsem and sem_is_sparse
 
+    # ── Temporal flow section ─────────────────────────────────────────────────
+    # Built from ctx.recent_concept_temporal_split (added in PR1).
+    # Shows first-half vs second-half semantic concept breakdown so the LLM can
+    # populate temporal_shift_summary and detect flow changes.
+    _ts = ctx.recent_concept_temporal_split
+    if _ts and not compact:
+        fh: dict = _ts.get("first_half", {})
+        sh: dict = _ts.get("second_half", {})
+        # Filter to semantic (goal-eligible) concepts only for the prompt
+        fh_sem = {c: n for c, n in fh.items() if is_goal_eligible(c)}
+        sh_sem = {c: n for c, n in sh.items() if is_goal_eligible(c)}
+        fh_str = ", ".join(f"{c}({n})" for c, n in sorted(fh_sem.items(), key=lambda x: -x[1])[:6]) or "(none)"
+        sh_str = ", ".join(f"{c}({n})" for c, n in sorted(sh_sem.items(), key=lambda x: -x[1])[:6]) or "(none)"
+        fh_top = max(fh_sem, key=fh_sem.get) if fh_sem else None
+        sh_top = max(sh_sem, key=sh_sem.get) if sh_sem else None
+        flow_shift = fh_top and sh_top and fh_top != sh_top
+        flow_summary = (
+            f"{fh_top}→{sh_top} shift detected"
+            if flow_shift
+            else ("stable — same top concept in both halves" if fh_top else "insufficient signal")
+        )
+        temporal_flow_lines = [
+            "",
+            "── TEMPORAL FLOW (oldest→newest, split into halves) ──────",
+            f"First half  (older items): {fh_str}",
+            f"Second half (newer items): {sh_str}",
+            f"Flow summary: {flow_summary}",
+            "  → Use this to fill temporal_shift_summary in your output.",
+            "  → Add \"temporal_shift\" to evidence_sources if a real concept shift is visible.",
+        ]
+    elif _ts and compact:
+        # compact mode: one-line summary only
+        fh_sem = {c: n for c, n in _ts.get("first_half", {}).items() if is_goal_eligible(c)}
+        sh_sem = {c: n for c, n in _ts.get("second_half", {}).items() if is_goal_eligible(c)}
+        fh_top = max(fh_sem, key=fh_sem.get) if fh_sem else None
+        sh_top = max(sh_sem, key=sh_sem.get) if sh_sem else None
+        flow_summary = (
+            f"{fh_top}→{sh_top} shift" if (fh_top and sh_top and fh_top != sh_top)
+            else ("stable" if fh_top else "insufficient signal")
+        )
+        temporal_flow_lines = [
+            "",
+            f"Temporal flow: {flow_summary}",
+        ]
+    else:
+        temporal_flow_lines = []
+
     # ── Price band comparison ──────────────────────────────────────────────────
     r_pb = ctx.recent_dominant_price_band or "unknown"
     p_pb = ctx.persona_dominant_price_band or "unknown"
@@ -398,68 +309,47 @@ def _build_user_prompt(ctx: IntentContext, candidate_concepts: list[str], compac
     cat_str   = ", ".join(cat_candidates[:cat_cap]) or "(none)"
     other_str = ", ".join(other_candidates[:15]) or "(none)"
 
-    lines = ["── USER CONTEXT ──────────────────────────────────────────"]
+    lines = ["── RECENT BEHAVIOR ───────────────────────────────────────"]
     if not compact:
-        lines.append(f"Recent items ({len(ctx.recent_item_ids)} total, showing last 5): {', '.join(ctx.recent_item_ids[-5:])}")
+        lines.append(f"Recent items (last 5): {', '.join(ctx.recent_item_ids[-5:])}")
     lines += [
+        f"Semantic freq      : {sem_freq_str}",
+        f"Overlap / dom / top2: {sem_overlap:.2f} / {sem_top_dom:.2f} / {sem_top2_frac:.2f}  |  distinct={sem_n_dist}",
+        f"Semantic top-1     : {sem_top1_cid}  (in persona top-10: {sem_top1_in_persona})",
+        f"Drift (not top-5)  : {sem_drift_str}",
         "",
-        "════ PRIMARY SIGNAL: SEMANTIC CONCEPTS (use this for reason classification) ════",
-        f"Semantic recent freq (genre/mood/theme only): {sem_freq_str}",
-        f"Semantic distinct count : {sem_n_dist}  |  Semantic top-dominance: {sem_top_dom:.2f}  |  Semantic top-2 frac: {sem_top2_frac:.2f}",
-        f"Semantic concentration  : {sem_concentration}",
-        f"Semantic top-1 concept  : {sem_top1_cid}  (in semantic persona top-10: {sem_top1_in_persona})",
-        f"Semantic overlap ratio  : {sem_overlap:.3f}  (semantic recent ∩ semantic persona top-10)",
-        f"Semantic drift concepts : {sem_drift_str}",
-        "",
-        "── LONG-TERM PERSONA (semantic) ──────────────────────────",
-        f"Semantic persona top-10 : {persona_sem_str}",
-        f"Full persona top-5      : {persona_top5_str}",
-        f"Full persona top-10     : {persona_top_str}",
+        "── LONG-TERM PERSONA ─────────────────────────────────────",
+        f"Semantic top-10    : {persona_sem_str}",
         price_line,
-        f"Recent format: {r_fmt}  |  Persona format: {p_fmt}",
-        "",
-        "── SEMANTIC ALIGNMENT GUIDANCE ───────────────────────────",
-        "  → DEFAULT: choose aligned when uncertain. Exploration needs POSITIVE evidence.",
-        "  → aligned:      overlap >= 0.40 OR drift is only broad/generic OR sparse signal",
-        "  → task_focus:   sem_top_dom >= 0.45 AND top-1 NOT in semantic persona top-10",
-        "  → budget_shift: price_band_shift=True AND price change is dominant difference",
-        "  → exploration:  specific novel concept (count>=2, NOT umbrella/platform) AND",
-        "                  NOT explainable by task_focus/budget_shift/simple rotation",
-        "  → unknown:      truly contradictory or < 3 distinct semantic concepts and",
-        "                  not clearly persona-consistent",
     ]
 
     if sparse_flag:
         lines += [
-            "",
-            "⚠ SPARSE SEMANTIC SIGNAL WARNING ──────────────────────",
-            f"  Raw top-1 concept is non-semantic ({raw_top1}) and semantic signal is weak.",
-            f"  Do NOT assign task_focus based on raw dominance alone.",
-            f"  Do NOT assign exploration unless a specific novel concept appears with count>=2.",
-            f"  Prefer aligned (low confidence) when what little signal exists overlaps persona.",
-            f"  Use unknown only if signal is truly contradictory — not merely sparse.",
+            f"⚠ SPARSE: raw top-1 is non-semantic ({raw_top1}). "
+            "Prefer aligned/unknown; exploration needs count>=2 specific concept.",
         ]
+
+    # Temporal flow section
+    if temporal_flow_lines:
+        lines += temporal_flow_lines
 
     if not compact:
         lines += [
             "",
-            "── AUXILIARY: RAW CONCEPT SIGNAL (for context only, do NOT use for classification) ──",
-            f"Raw recent freq (all types, top-15): {freq_str_raw}",
+            f"Raw freq (aux): {freq_str_raw}",
         ]
 
     lines += [
         "",
-        "── EXPLORATION GOAL CANDIDATES (use for exploration goal_concepts) ──",
-        f"Semantic drift NOT in persona top-5: [{sem_drift_str}]",
-        "  → For exploration: prefer concepts from this list",
-        "  → Avoid: UMBRELLA, PLATFORM, NAVIGATION, PROMO_DEAL, PUBLISHER, FORMAT_META roles",
-        "  → If all drift concepts have count=1 and there are 3+, pick only top 2",
+        f"Drift candidates   : [{sem_drift_str}]",
+        "── CANDIDATE CONCEPTS ────────────────────────────────────",
+        f"category: [{cat_str}]",
+    ]
+    if other_str != "(none)":
+        lines.append(f"other:    [{other_str}]")
+    lines += [
         "",
-        "── CANDIDATE CONCEPTS (select goal_concepts ONLY from here) ──",
-        f"category concepts: [{cat_str}]",
-        f"other concepts:    [{other_str}]",
-        "",
-        "Classify this user's short-term intent following the decision rules in the system prompt.",
+        "Interpret this user's recent behavior. Fill all OUTPUT SCHEMA fields.",
     ]
     return "\n".join(lines)
 
@@ -563,6 +453,25 @@ def _validate_and_ground(raw: dict, candidate_concepts: list[str], ctx: IntentCo
         evidence = ctx.recent_item_ids[-3:]
     evidence = [str(e) for e in evidence]
 
+    # ── v6: parse new structured fields from LLM output ──────────────────
+    # contrast_signal_concepts: persona concepts the LLM identified as conflicting
+    # with recent behavior.  Must be a list of strings; sanitize aggressively.
+    raw_csc = raw.get("contrast_signal_concepts", [])
+    if not isinstance(raw_csc, list):
+        raw_csc = []
+    contrast_signal_concepts_llm: list[str] = [str(c) for c in raw_csc if isinstance(c, str)]
+
+    # temporal_shift_summary: short phrase from LLM describing the dominant shift.
+    raw_tss = raw.get("temporal_shift_summary", "")
+    temporal_shift_summary_llm: str = str(raw_tss).strip()[:120] if raw_tss else ""
+
+    # evidence_sources from LLM: list of allowed tokens only (whitelist).
+    _allowed_ev = {"recent_freq", "temporal_shift", "persona_contrast"}
+    raw_ev = raw.get("evidence_sources", [])
+    if not isinstance(raw_ev, list):
+        raw_ev = []
+    evidence_sources_llm: list[str] = [s for s in raw_ev if s in _allowed_ev]
+
     return {
         "goal_concepts": goal_concepts,
         "constraints": constraints,
@@ -571,6 +480,24 @@ def _validate_and_ground(raw: dict, candidate_concepts: list[str], ctx: IntentCo
         "ttl_steps": ttl_steps,
         "persona_alignment_score": alignment,
         "evidence_item_ids": evidence,
+        # ── v3/v6: structured interpretation fields ───────────────────────────
+        # context_goals: pre-Stage-2 placeholder; overwritten after Stage 2.
+        "context_goals": list(goal_concepts),
+        # contrast_with_persona: merged from LLM output + Stage 2 upward-pass.
+        # Stored as {concept_id: source} where source is "llm" or "grounding".
+        # Finalized in interpret_with_llm() after Stage 2.
+        "contrast_with_persona": {},
+        # contrast_signal_concepts_llm: raw LLM output before merging.
+        # Used in interpret_with_llm() to build the final contrast_with_persona dict.
+        "_contrast_signal_concepts_llm": contrast_signal_concepts_llm,
+        # temporal_cues: finalized in interpret_with_llm() from ctx + LLM summary.
+        "temporal_cues": {},
+        # temporal_shift_summary_llm: LLM's short phrase about the temporal shift.
+        "_temporal_shift_summary_llm": temporal_shift_summary_llm,
+        # evidence_sources: finalized in interpret_with_llm() merging LLM + code.
+        "evidence_sources": evidence_sources_llm,
+        # support_items: evidence item IDs alias.
+        "support_items": list(evidence),
     }
 
 
@@ -583,26 +510,23 @@ def interpret_with_llm(
     candidate_concept_bank: "dict[str, int] | None" = None,
 ) -> dict:
     """
-    3-stage short-term intent interpretation.
+    Interpret a user's recent behavior in the context of their long-term persona.
 
-    Stage 1 (this function):
-        Call LLM to classify deviation_reason and produce raw_llm_goal_concepts.
-        LLM output is grounded to the LLM prompt candidate pool (recent ∪ persona top).
+    Returns a RecentInterpretationRecord-shaped dict with two channels:
+      SCORING  — validated_goal_concepts, context_goals, deviation_reason, confidence,
+                 contrast_with_persona, temporal_cues, evidence_sources, ttl_steps
+      AUDIT    — llm_explanation_short, why_not_aligned, why_exploration,
+                 raw_llm_goals, grounding_diagnostics, llm_raw  (see AUDIT_ONLY_FIELDS)
 
-    Stage 2 (grounded_selector.validate_and_select_goals):
-        Validate raw_llm_goal_concepts against the backbone candidate_concept_bank.
-        Applies: activation gate, persona conflict suppression, low-conf near-zero trust.
-        Output stored as validated_goal_concepts.
-        Only runs if candidate_concept_bank is provided; otherwise falls back to
-        goal_concepts (backward-compat mode).
+    Stage 1: LLM interprets recent context → structured record + audit rationale.
+    Stage 2: grounded_selector validates goal_concepts against backbone candidates.
+             Runs only when candidate_concept_bank is provided (production path).
+    Stage 3: signal_builder (downstream) reads scoring channel only.
 
-    Stage 3 (signal_builder — downstream):
-        signal_builder consumes validated_goal_concepts, not raw LLM goals.
-
-    compact=True: cost-reduced prompt mode for 4o pilot runs.
-    candidate_concept_bank: {concept_id: activation_count} built from backbone top-K
-        candidates' item concepts (see grounded_selector.build_candidate_concept_bank).
-        If None, Stage 2 is skipped.
+    compact=True — shorter prompt for cost-sensitive runs (same decision signals,
+                   fewer lines, temporal flow one-line summary only).
+    candidate_concept_bank — {concept_id: activation_count} from backbone top-K.
+                             Pass None to skip Stage 2 (backward-compat; not recommended).
     """
     # Stage 1 — LLM interpretation
     prompt_candidates = _build_candidate_concepts(ctx, intent_cfg)
@@ -613,6 +537,23 @@ def interpret_with_llm(
     max_tokens = intent_cfg.get("llm", {}).get("max_tokens", 512)
     if compact:
         max_tokens = min(max_tokens, 256)
+
+    # ── Token instrumentation ─────────────────────────────────────────────────
+    # Char-level proxy for token counts (no tiktoken dependency).
+    # Populated before the LLM call so we capture prompt cost even on failure.
+    # Exact token counts are filled from response.usage when available.
+    _sys_chars  = len(_SYSTEM_PROMPT)
+    _user_chars = len(user_prompt)
+    _token_usage: dict[str, int] = {
+        "system_prompt_chars": _sys_chars,
+        "user_prompt_chars":   _user_chars,
+        "compact": int(compact),
+    }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "token_instrumentation user=%s idx=%s  sys=%d chars  user=%d chars  compact=%s",
+            ctx.user_id, ctx.target_index, _sys_chars, _user_chars, compact,
+        )
 
     try:
         response = openai_client.chat.completions.create(
@@ -632,6 +573,26 @@ def interpret_with_llm(
         result["source_mode"] = "llm"
         result["llm_raw"] = raw_text
 
+        # ── Token counts from response.usage (exact, when available) ──────────
+        _usage = getattr(response, "usage", None)
+        if _usage is not None:
+            _pt = getattr(_usage, "prompt_tokens", None)
+            _ct = getattr(_usage, "completion_tokens", None)
+            _tt = getattr(_usage, "total_tokens", None)
+            if _pt is not None:
+                # prompt_tokens = system + user combined (OpenAI API semantics)
+                _token_usage["prompt_tokens"]   = _pt
+                _token_usage["response_tokens"] = _ct or 0
+                _token_usage["total_tokens"]    = _tt or (_pt + (_ct or 0))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "token_usage user=%s idx=%s  prompt=%s response=%s total=%s",
+                    ctx.user_id, ctx.target_index,
+                    _token_usage.get("prompt_tokens", "?"),
+                    _token_usage.get("response_tokens", "?"),
+                    _token_usage.get("total_tokens", "?"),
+                )
+
         # ── Rationale slots from LLM output (new in v3) ───────────────────────
         # Sanitize: must be str, max ~300 chars, empty string as fallback.
         def _clean_slot(val: Any, max_len: int = 300) -> str:
@@ -646,6 +607,9 @@ def interpret_with_llm(
     except Exception as exc:
         logger.warning("LLM interpretation failed for user=%s: %s", ctx.user_id, exc)
         result = _heuristic_fallback(ctx, prompt_candidates)
+
+    # token_usage is always written (may be chars-only if LLM failed or usage absent)
+    result["token_usage"] = _token_usage
 
     # Preserve Stage 1 output as raw_llm_goals (before Stage 2, before hygiene)
     result["raw_llm_goals"] = list(result.get("goal_concepts", []))
@@ -732,6 +696,106 @@ def interpret_with_llm(
     # pre_grounding_goal_text = raw_llm_goals (set here so Stage 2 result is already known)
     result["pre_grounding_goal_text"] = list(result["raw_llm_goals"])
 
+    # ── v3/v6: finalize structured interpretation fields ──────────────────────
+    # Merge LLM-parsed structured output with code-injected ground-truth signals.
+    # Priority: code-injected structural signals > LLM output (LLM may be wrong).
+    # Final fields go into the scoring channel; LLM rationale stays audit-only.
+
+    # context_goals: finalized alias for validated_goal_concepts (scoring path).
+    result["context_goals"] = list(result.get("validated_goal_concepts", result.get("goal_concepts", [])))
+
+    # ── contrast_with_persona ─────────────────────────────────────────────────
+    # Merge two sources:
+    #   (A) Stage 2 upward-pass: concepts suppressed because they matched persona top-N
+    #       → these are structurally grounded; stored as {concept_id: bank_activation}
+    #   (B) LLM output (contrast_signal_concepts_llm): persona concepts the LLM flagged
+    #       → stored as {concept_id: "llm"} to distinguish from grounding source
+    _gd = result.get("grounding_diagnostics", {})
+    _suppressed = _gd.get("suppressed_by_persona", [])
+    _grounding_contrast = _gd.get("contrast_signal", {})   # {concept_id: bank_activation}
+
+    _llm_csc = result.pop("_contrast_signal_concepts_llm", [])
+    _contrast: dict = {}
+    for c, act in _grounding_contrast.items():
+        _contrast[c] = act        # int: bank activation count (grounding-sourced)
+    for c in _llm_csc:
+        if c not in _contrast:
+            _contrast[c] = "llm"  # str sentinel: LLM-sourced, not yet grounding-verified
+
+    result["contrast_with_persona"] = _contrast
+
+    # evidence_sources: start from LLM output (already whitelist-filtered),
+    # then add code-injected signals that the LLM might have missed.
+    _ev: list[str] = list(result.get("evidence_sources", []))
+
+    if _suppressed and "persona_contrast" not in _ev:
+        _ev.append("persona_contrast")
+
+    # ── temporal_cues ─────────────────────────────────────────────────────────
+    # Built from IntentContext.recent_concept_temporal_split (authoritative).
+    # LLM temporal_shift_summary is stored inside as an audit-friendly phrase.
+    _ts = ctx.recent_concept_temporal_split
+    _llm_tss = result.pop("_temporal_shift_summary_llm", "")
+    if _ts:
+        fh: dict = _ts.get("first_half", {})
+        sh: dict = _ts.get("second_half", {})
+        fh_sem = {c: n for c, n in fh.items() if is_goal_eligible(c)}
+        sh_sem = {c: n for c, n in sh.items() if is_goal_eligible(c)}
+        fh_top = max(fh_sem, key=fh_sem.get) if fh_sem else None
+        sh_top = max(sh_sem, key=sh_sem.get) if sh_sem else None
+        shift_detected = bool(fh_top and sh_top and fh_top != sh_top)
+        result["temporal_cues"] = {
+            "shift_detected": shift_detected,
+            "first_half_dominant": fh_top,
+            "second_half_dominant": sh_top,
+            "first_half_freq": fh_sem,
+            "second_half_freq": sh_sem,
+            # LLM's natural-language interpretation of the shift.
+            # Kept here for offline audit; not used for scoring.
+            "llm_shift_summary": _llm_tss,
+        }
+        if shift_detected and "temporal_shift" not in _ev:
+            _ev.append("temporal_shift")
+    else:
+        result["temporal_cues"] = {"llm_shift_summary": _llm_tss} if _llm_tss else {}
+
+    # evidence_sources baseline: recent_freq is always present when semantic signal exists.
+    _sem_total_for_evidence = sum(
+        cnt for cid, cnt in ctx.recent_concept_freq.items()
+        if is_semantic_goal(cid)
+    )
+    if _sem_total_for_evidence > 0 and "recent_freq" not in _ev:
+        _ev.insert(0, "recent_freq")
+
+    result["evidence_sources"] = _ev
+
+    # support_items: finalize from evidence_item_ids (scoring-safe alias).
+    result["support_items"] = list(result.get("evidence_item_ids", []))
+
+    # ── instrumentation ───────────────────────────────────────────────────────
+    # Logged at DEBUG so it has zero runtime cost in production but is available
+    # for offline analysis via --log-level DEBUG.
+    if logger.isEnabledFor(logging.DEBUG):
+        _reason   = result.get("deviation_reason", "?")
+        _ev       = result.get("evidence_sources", [])
+        _ct       = result.get("contrast_with_persona", {})
+        _tc       = result.get("temporal_cues", {})
+        _n_val    = len(result.get("validated_goal_concepts", []))
+        _n_raw    = len(result.get("raw_llm_goals", []))
+        _n_csc    = len([v for v in _ct.values() if v == "llm"])    # LLM-only contrast
+        _n_grd    = len([v for v in _ct.values() if v != "llm"])    # grounding-verified contrast
+        logger.debug(
+            "interpret user=%s idx=%s  reason=%s conf=%.2f  "
+            "raw_goals=%d validated=%d  contrast(llm=%d,grnd=%d)  "
+            "shift=%s  evidence=%s",
+            ctx.user_id, ctx.target_index,
+            _reason, float(result.get("confidence", 0.0)),
+            _n_raw, _n_val,
+            _n_csc, _n_grd,
+            _tc.get("shift_detected", False),
+            _ev,
+        )
+
     return result
 
 
@@ -787,4 +851,16 @@ def _heuristic_fallback(ctx: IntentContext, candidate_concepts: list[str]) -> di
         "semantic_signal_absent":       False,
         "non_semantic_goal_leakage":    False,
         "goal_hygiene_status":          "fallback",
+        # v3/v6: structured interpretation fields — empty for fallback path.
+        # interpret_with_llm() finalizes these via merge logic after this returns.
+        "context_goals":                    list(goal_concepts),
+        "contrast_with_persona":            {},
+        "_contrast_signal_concepts_llm":    [],   # no LLM call → no LLM contrast output
+        "temporal_cues":                    {},
+        "_temporal_shift_summary_llm":      "",   # no LLM call → no LLM shift summary
+        "evidence_sources":                 [],
+        "support_items":                    list(ctx.recent_item_ids[-3:]),
+        # token_usage: empty for fallback (no LLM call); filled by interpret_with_llm
+        # after this returns using the char-level proxy captured before the call.
+        "token_usage":                      {},
     }

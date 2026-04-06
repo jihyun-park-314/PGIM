@@ -417,18 +417,24 @@ def main() -> None:
         "goal_concepts", "evidence_item_ids", "raw_llm_goals", "validated_goal_concepts",
         "evidence_recent_concepts", "evidence_persona_concepts", "pre_grounding_goal_text",
         "removed_non_semantic_goals",
+        # PR3-1 list fields
+        "context_goals", "evidence_sources", "support_items",
     )
     for _list_col in _list_cols:
         if _list_col in df_intents.columns:
             df_intents[_list_col] = df_intents[_list_col].apply(
                 lambda x: list(x) if isinstance(x, (list, tuple)) else ([] if x is None else [str(x)])
             )
-    # grounding_diagnostics: store as JSON string to avoid nested-dict parquet issues
-    if "grounding_diagnostics" in df_intents.columns:
-        import json as _json
-        df_intents["grounding_diagnostics"] = df_intents["grounding_diagnostics"].apply(
-            lambda x: _json.dumps(x, ensure_ascii=False) if isinstance(x, dict) else "{}"
-        )
+    # JSON-string columns: store nested dicts as JSON strings to avoid parquet issues
+    import json as _json
+    _json_cols = ("grounding_diagnostics", "contrast_with_persona", "temporal_cues", "token_usage")
+    for _jcol in _json_cols:
+        if _jcol in df_intents.columns:
+            df_intents[_jcol] = df_intents[_jcol].apply(
+                lambda x: x if isinstance(x, str) else (
+                    _json.dumps(x, ensure_ascii=False) if isinstance(x, dict) else "{}"
+                )
+            )
     df_intents.to_parquet(intent_path, index=False)
     logger.info("saved -> %s  (%d rows)", intent_path, len(df_intents))
 

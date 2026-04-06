@@ -47,6 +47,11 @@ class IntentContext:
     recent_source_search_frac: float = 0.5   # fraction of recent items from search
     source_shift_flag: bool = False          # True if source composition shifted notably
 
+    # v3: temporal split — concept freq in first vs second half of recent window
+    # {"first_half": {concept_id: count}, "second_half": {concept_id: count}}
+    # Used by llm_interpreter to populate temporal_cues in the interpretation record.
+    recent_concept_temporal_split: dict = field(default_factory=dict)
+
     def to_record(self) -> dict:
         return {
             "user_id": self.user_id,
@@ -68,6 +73,7 @@ class IntentContext:
             "recent_source_rec_frac": self.recent_source_rec_frac,
             "recent_source_search_frac": self.recent_source_search_frac,
             "source_shift_flag": self.source_shift_flag,
+            "recent_concept_temporal_split_json": json.dumps(self.recent_concept_temporal_split),
         }
 
 
@@ -147,6 +153,9 @@ class ContextExtractor:
         current_source, recent_rec_frac, recent_search_frac, source_shift = \
             self._compute_source_context(user_id, recent_items)
 
+        # v3: temporal split — first half vs second half of recent window
+        temporal_split = self._compute_temporal_split(recent_items)
+
         ctx = IntentContext(
             user_id=user_id,
             target_index=target_index,
@@ -167,6 +176,7 @@ class ContextExtractor:
             recent_source_rec_frac=recent_rec_frac,
             recent_source_search_frac=recent_search_frac,
             source_shift_flag=source_shift,
+            recent_concept_temporal_split=temporal_split,
         )
         return ctx
 
@@ -209,3 +219,39 @@ class ContextExtractor:
         source_shift = shift > 0.4
 
         return current_source, rec_frac, search_frac, source_shift
+
+    def _compute_temporal_split(self, recent_items: list[str]) -> dict:
+        """
+        Split recent window into first half / second half and compute
+        goal-eligible concept frequency for each half.
+
+        Returns:
+            {
+                "first_half":  {concept_id: count, ...},
+                "second_half": {concept_id: count, ...},
+            }
+
+        Uses only goal-eligible concepts (no PLATFORM/UMBRELLA/NAV/PROMO/FORMAT),
+        matching the same filter applied in the main recent_concept_freq.
+        Returns empty dict when recent_items has fewer than 2 items (no split possible).
+        """
+        if len(recent_items) < 2:
+            return {}
+
+        mid = max(1, len(recent_items) // 2)
+        first_half_items  = recent_items[:mid]
+        second_half_items = recent_items[mid:]
+
+        def _freq_for(items: list[str]) -> dict[str, int]:
+            freq: Counter = Counter()
+            for item_id in items:
+                for cid in self._item_concepts.get(item_id, []):
+                    ctype = cid.split(":")[0]
+                    if ctype in self._signal_types:
+                        freq[cid] += 1
+            return dict(freq)
+
+        return {
+            "first_half":  _freq_for(first_half_items),
+            "second_half": _freq_for(second_half_items),
+        }
