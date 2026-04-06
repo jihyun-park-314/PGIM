@@ -24,7 +24,12 @@ batch_size: 128
 num_epochs: 100
 learning_rate: 0.001
 early_stopping_patience: 10
+split_mode: leave_one_out
 eval_ndcg_k: 10
+eval_every_n_epochs: 1
+full_eval_every_n_epochs: 1
+eval_max_users: null
+full_eval_max_users: null
 
 # ── Inference toggle ──────────────────────────────────────────────────────────
 use_trained_model: false

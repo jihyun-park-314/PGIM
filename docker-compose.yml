@@ -3,13 +3,12 @@ version: "3.9"
 services:
   pgim:
     container_name: pgim
+    gpus: all
     build:
       context: .
       dockerfile: docker/Dockerfile
     volumes:
-      - ./src:/pgim/src
-      - ./config:/pgim/config
-      - ./data:/pgim/data
+      - .:/pgim
     environment:
       - PYTHONPATH=/pgim
       - PYTHONUNBUFFERED=1

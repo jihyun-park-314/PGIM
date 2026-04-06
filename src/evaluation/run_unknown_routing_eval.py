@@ -108,6 +108,7 @@ def _run_eval_branch(
     modulation_cfg: dict,
     k_values: list[int],
     experiment_modes: dict[str, str],
+    reason_mode: str = "mainline_v5_baseline",
 ) -> dict[str, dict]:
     from src.modulation.gate import compute_gate_strength
     from src.modulation.reranker import CandidateReranker
@@ -129,12 +130,14 @@ def _run_eval_branch(
                 key=lambda x: x[1], reverse=True,
             )
 
-            # routed_reason takes priority in signal_builder (already patched)
-            eff_reason = (
-                intent_rec.get("routed_reason")
-                or intent_rec.get("recalibrated_reason")
-                or intent_rec.get("deviation_reason", "unknown")
-            )
+            # mainline: use baseline reason path (deviation_reason only)
+            # diagnostic: allow unknown soft routing reason path
+            base_reason = intent_rec.get("deviation_reason", "unknown")
+            routed_reason = intent_rec.get("routed_reason")
+            if reason_mode == "diagnostic_unknown_soft_routing":
+                eff_reason = routed_reason or base_reason
+            else:
+                eff_reason = base_reason
             confidence = float(intent_rec.get("confidence", 0.5))
             alignment  = float(intent_rec.get("persona_alignment_score", 0.0))
 
@@ -145,16 +148,19 @@ def _run_eval_branch(
                 persona_alignment_score=alignment,
                 gate_cfg=modulation_cfg.get("gate", {}),
             )
-            signal = build_signal(intent_rec, persona_nodes, gate_strength, modulation_cfg, mode=mode)
+            scored_intent = dict(intent_rec)
+            scored_intent["routed_reason"] = eff_reason
+            signal = build_signal(scored_intent, persona_nodes, gate_strength, modulation_cfg, mode=mode)
             ranked = reranker.rerank(candidate_tuples, signal, mode=mode)
 
             gt_items = gt_items_by_key.get((uid, tidx), set())
             for r in ranked:
                 rec = r.to_record()
                 rec["is_gt"]            = int(rec["candidate_item_id"] in gt_items)
-                rec["deviation_reason"] = intent_rec.get("deviation_reason", "unknown")
-                rec["routed_reason"]    = intent_rec.get("routed_reason", eff_reason)
+                rec["deviation_reason"] = base_reason
+                rec["routed_reason"]    = routed_reason if routed_reason is not None else base_reason
                 rec["unknown_subtype"]  = intent_rec.get("unknown_subtype", "")
+                rec["scoring_reason_used"] = eff_reason
                 all_ranked.append(rec)
 
         df_r = pd.DataFrame(all_ranked)
@@ -180,7 +186,7 @@ def _run_eval_branch(
         metrics["mode"]   = mode_name
 
         # per-routed_reason breakdown
-        for rsn, rg in gt_df.groupby("routed_reason"):
+        for rsn, rg in gt_df.groupby("scoring_reason_used"):
             rranks  = rg["_rank"].values.astype(int)
             rdeltas = rg["modulation_delta"].values if "modulation_delta" in rg.columns else None
             metrics[f"reason_{rsn}"] = _compute_metrics(rranks, rdeltas, k_values)
@@ -306,6 +312,16 @@ def main() -> None:
     ap.add_argument("--backbone-candidates-path", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--max-users", type=int, default=None)
+    ap.add_argument(
+        "--reason-mode",
+        choices=("mainline_v5_baseline", "diagnostic_unknown_soft_routing"),
+        default="mainline_v5_baseline",
+        help=(
+            "Reason path used for scoring. "
+            "mainline_v5_baseline uses deviation_reason only; "
+            "diagnostic_unknown_soft_routing allows routed_reason for unknown records."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -405,6 +421,7 @@ def main() -> None:
         lambda r: (r["user_id"], int(r["target_index"])) in shared_keys, axis=1
     )].reset_index(drop=True)
     logger.info("v5 intent after shared key filter: %d records", len(df_v5))
+    logger.info("Scoring reason mode: %s", args.reason_mode)
 
     # ── Task 1: Unknown Audit ──────────────────────────────────────────────────
     logger.info("Running unknown subtype audit (Task 1)...")
@@ -470,6 +487,7 @@ def main() -> None:
     res_a = _run_eval_branch(
         "A_v5_baseline", v5_baseline_by_key, cand_by_key, backbone_scores,
         persona_nodes_by_user, item_concepts, gt_items_by_key, mod_cfg, k_values, experiment_modes,
+        reason_mode=args.reason_mode,
     )
     for mode, metrics in res_a.items():
         all_results.append(metrics)
@@ -478,6 +496,7 @@ def main() -> None:
     res_b = _run_eval_branch(
         "B_v5_unknown_routed", v5_routed_by_key, cand_by_key, backbone_scores,
         persona_nodes_by_user, item_concepts, gt_items_by_key, mod_cfg, k_values, experiment_modes,
+        reason_mode=args.reason_mode,
     )
     for mode, metrics in res_b.items():
         all_results.append(metrics)
@@ -490,6 +509,7 @@ def main() -> None:
         res_c = _run_eval_branch(
             "C_heuristic_control", heur_by_key, cand_by_key, backbone_scores,
             persona_nodes_by_user, item_concepts, gt_items_by_key, mod_cfg, k_values, experiment_modes,
+            reason_mode=args.reason_mode,
         )
         for mode, metrics in res_c.items():
             all_results.append(metrics)
@@ -502,6 +522,7 @@ def main() -> None:
         res_d = _run_eval_branch(
             "D_v3_baseline", v3_by_key, cand_by_key, backbone_scores,
             persona_nodes_by_user, item_concepts, gt_items_by_key, mod_cfg, k_values, experiment_modes,
+            reason_mode=args.reason_mode,
         )
         for mode, metrics in res_d.items():
             all_results.append(metrics)

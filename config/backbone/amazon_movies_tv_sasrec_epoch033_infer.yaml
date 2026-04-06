@@ -1,0 +1,16 @@
+model: sasrec
+backbone_mode: trained_sasrec
+top_k: 100
+
+fallback:
+  policy: popularity
+  min_sequence_length: 2
+
+model_dim: 128
+num_blocks: 2
+num_heads: 2
+dropout: 0.2
+max_seq_len: 50
+
+use_trained_model: true
+checkpoint_path: data/checkpoints/amazon_movies_tv/epochs/sasrec_epoch_033.pt

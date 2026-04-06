@@ -1,2 +1,7 @@
 data/
+results/
+backup_pgim_v02_before/
 .env
+__pycache__/
+*.pyc
+.codex

@@ -37,6 +37,7 @@ def build_item_vocab(sequences: list[list[str]]) -> tuple[dict[str, int], dict[i
 
 def data_partition(
     idx_sequences: list[list[int]],
+    split_mode: str = "leave_one_out",
 ) -> tuple[list[list[int]], list[int], list[int]]:
     """
     Split each integer sequence into train / valid / test.
@@ -52,15 +53,53 @@ def data_partition(
     user_test:  list[int] = []
 
     for seq in idx_sequences:
-        if len(seq) < 4:
-            # too short for proper split — put everything in train
-            user_train.append(seq[:])
-            user_valid.append(0)
-            user_test.append(0)
-        else:
-            user_train.append(seq[:-2])
-            user_valid.append(seq[-2])
-            user_test.append(seq[-1])
+        if split_mode == "leave_one_out":
+            if len(seq) < 4:
+                # too short for proper split — put everything in train
+                user_train.append(seq[:])
+                user_valid.append(0)
+                user_test.append(0)
+            else:
+                user_train.append(seq[:-2])
+                user_valid.append(seq[-2])
+                user_test.append(seq[-1])
+            continue
+
+        if split_mode == "chrono_8_2":
+            # Chronological 8:2 holdout. Keep chronology deterministic.
+            # Train: first 80%, Valid/Test: last 20% tail.
+            # If too short for stable 8:2 + valid/test tail, fall back to leave-one-out.
+            n = len(seq)
+            if n < 10:
+                if n < 4:
+                    user_train.append(seq[:])
+                    user_valid.append(0)
+                    user_test.append(0)
+                else:
+                    user_train.append(seq[:-2])
+                    user_valid.append(seq[-2])
+                    user_test.append(seq[-1])
+                continue
+
+            cut = int(n * 0.8)
+            cut = max(2, min(cut, n - 2))  # keep at least 2 tail items for valid/test
+            train_seq = seq[:cut]
+            tail = seq[cut:]
+
+            if len(tail) < 2:
+                # safety fallback (should be rare with cut clamp above)
+                train_seq = seq[:-2]
+                tail = seq[-2:]
+
+            user_train.append(train_seq)
+            user_valid.append(tail[-2])
+            user_test.append(tail[-1])
+            continue
+
+        raise ValueError(
+            f"Unsupported split_mode={split_mode!r}. "
+            "Use 'leave_one_out' or 'chrono_8_2'."
+        )
 
     return user_train, user_valid, user_test
 

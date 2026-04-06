@@ -1,0 +1,94 @@
+# Deterministic bridge / anchor rules for typed matcher audit (Movies & TV)
+
+bridge_alias:
+  category:action:
+    - category:action_&_adventure
+    - category:adventure
+  category:action_&_adventure:
+    - category:action
+    - category:adventure
+  category:kids_&_family:
+    - category:children_&_family
+    - category:kids
+  category:children_&_family:
+    - category:kids_&_family
+  category:science_fiction:
+    - category:sci_fi
+    - category:science_fiction_&_fantasy
+  category:science_fiction_&_fantasy:
+    - category:science_fiction
+    - category:fantasy
+  category:mystery_&_thrillers:
+    - category:suspense
+    - category:mystery
+  category:tv_shows:
+    - category:television
+  category:anime:
+    - category:anime_&_manga
+  category:musicals_&_performing_arts:
+    - category:musicals
+
+# deterministic work-level projection aliases
+work_projection_alias:
+  category:sci_fi:
+    - category:science_fiction
+  category:science_fiction_&_fantasy:
+    - category:science_fiction
+  category:children_&_family:
+    - category:kids_&_family
+  category:kids:
+    - category:kids_&_family
+  category:action_&_adventure:
+    - category:action
+  category:mystery_&_thrillers:
+    - category:mystery
+
+# one-hop, whitelist-only expansion inside SemanticCore/SemanticAnchor surface
+anchor_one_hop:
+  category:science_fiction:
+    - category:space_opera
+    - category:futuristic
+  category:horror:
+    - category:dark
+    - category:atmospheric
+  category:drama:
+    - category:emotional
+    - category:contemplative
+  category:comedy:
+    - category:lighthearted
+    - category:campy
+  category:action:
+    - category:thriller
+    - category:cops_&_triads
+  category:action_&_adventure:
+    - category:thriller
+    - category:adventure
+
+# exploration에서 허용할 high-utility anchor subset (optional whitelist)
+anchor_allowlist:
+  - category:thriller
+  - category:adventure
+  - category:space_opera
+  - category:futuristic
+  - category:dark
+  - category:atmospheric
+  - category:emotional
+  - category:contemplative
+  - category:lighthearted
+  - category:campy
+  - category:cops_&_triads
+
+# prevent over-broad or meta leakage in expansion
+generic_blocklist:
+  - category:movies_&_tv
+  - category:movies
+  - category:tv
+  - category:prime_video
+  - category:featured_categories
+  - category:all_titles
+  - category:collections
+  - category:by_genre
+  - category:by_country
+  - category:by_age
+  - category:channels
+  - category:characters_&_series
